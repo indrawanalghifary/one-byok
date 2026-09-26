@@ -352,6 +352,7 @@ class BYOKModelsProvider {
       return this._cache.models;
     }
     const enableTools = settings().get('enableTools', true);
+    const enableVision = settings().get('enableVision', true);
     const defaultMaxIn = settings().get('maxInputTokens', 262144);
     const defaultMaxOut = settings().get('maxOutputTokens', 32768);
 
@@ -386,6 +387,7 @@ class BYOKModelsProvider {
           const detailStr = ep.name
             ? `${ep.name} · context: ${maxIn.toLocaleString()} tokens`
             : `context: ${maxIn.toLocaleString()} tokens`;
+          const supportsVision = enableVision && isVisionSupported(m);
           models.push({
             id: `${ep.baseUrl}|${modelName}`,
             name: displayName,
@@ -393,7 +395,7 @@ class BYOKModelsProvider {
             version: m.created ? String(m.created) : '1',
             maxInputTokens: maxIn,
             maxOutputTokens: maxOut,
-            capabilities: { toolCalling: enableTools, imageInput: false },
+            capabilities: { toolCalling: enableTools, imageInput: supportsVision },
             isUserSelectable: true,
             detail: detailStr,
             tooltip: `${modelName} · context: ${maxIn.toLocaleString()} tokens`,
@@ -490,7 +492,11 @@ class BYOKModelsProvider {
     if (workspaceContextStr) {
       const hasSystemMsg = messagesForModel.length > 0 && messagesForModel[0].role === 'system';
       if (hasSystemMsg) {
-        messagesForModel[0].content = (messagesForModel[0].content || '') + '\n\n' + workspaceContextStr;
+        if (typeof messagesForModel[0].content === 'string') {
+          messagesForModel[0].content = (messagesForModel[0].content || '') + '\n\n' + workspaceContextStr;
+        } else if (Array.isArray(messagesForModel[0].content)) {
+          messagesForModel[0].content.push({ type: 'text', text: workspaceContextStr });
+        }
       } else {
         messagesForModel.unshift({
           role: 'system',
@@ -512,7 +518,10 @@ class BYOKModelsProvider {
       body.max_tokens = opts.maxTokens;
     }
     const enableTools = settings().get('enableTools', true);
-    if (enableTools && options.tools?.length) {
+    const hasImageContent = messagesForModel.some((m) =>
+      Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')
+    );
+    if (enableTools && options.tools?.length && !hasImageContent) {
       body.tools = options.tools.map((t) => ({
         type: 'function',
         function: {
@@ -525,6 +534,8 @@ class BYOKModelsProvider {
         body.tool_choice = 'required';
       }
       log(`Tools available: ${options.tools.map((t) => t.name).join(', ')}`);
+    } else if (hasImageContent) {
+      log('Tools omitted: request contains image content (some endpoints reject tools + image_url)');
     }
 
     const requestTimeoutMs = settings().get('requestTimeoutMs', 300_000);
@@ -681,8 +692,102 @@ function isToolResultPart(part) {
 }
 
 /**
+ * Detect whether a model supports vision / image inputs based on server metadata or model id patterns.
+ * @param {object} m - Model object from /v1/models response
+ * @returns {boolean}
+ */
+function isVisionSupported(m) {
+  if (m?.capabilities?.vision !== undefined) {
+    return Boolean(m.capabilities.vision);
+  }
+  if (m?.capabilities?.imageInput !== undefined) {
+    return Boolean(m.capabilities.imageInput);
+  }
+  const id = String(m?.id ?? '');
+  return /vision|image|-vl\b|_vl\b|pixtral|llava|gemini|claude-3|claude-4|claude-sonnet|claude-opus|claude-haiku|claude-fable|gpt-4o|gpt-4-turbo|gpt-4-vision|\bo1|\bo3/i.test(id);
+}
+
+function isImagePart(part) {
+  if (!part || typeof part !== 'object') {
+    return false;
+  }
+  if (typeof part.mimeType === 'string' && part.mimeType.startsWith('image/')) {
+    return true;
+  }
+  if (part.type === 'image_url' || part.type === 'image') {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Normalize the many shapes image bytes arrive in (Buffer, Uint8Array,
+ * ArrayBuffer, number[], or a VSBuffer-like `{ buffer, byteOffset, byteLength }`)
+ * into a plain Uint8Array view. Prefer the view over its raw `.buffer`: VS Code
+ * hands out Uint8Arrays that can be windows into a shared pool, so reading
+ * `.buffer` alone would drag in unrelated bytes and corrupt the image.
+ */
+function toUint8Array(value) {
+  if (!value) {
+    return undefined;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value);
+  }
+  if (typeof value === 'object') {
+    if (value.buffer instanceof ArrayBuffer) {
+      // VSBuffer-like: keep the byteOffset/byteLength window intact.
+      return new Uint8Array(value.buffer, value.byteOffset ?? 0, value.byteLength);
+    }
+    // Serialized-as-object fallback: `{ "0": 137, "1": 80, ... }`.
+    const values = Object.values(value);
+    if (values.length > 0 && values.every((v) => typeof v === 'number')) {
+      return Uint8Array.from(values);
+    }
+  }
+  return undefined;
+}
+
+function toOpenAiImageContent(part) {
+  const mimeType = part.mimeType || 'image/png';
+  const bytes = toUint8Array(part.data) ?? toUint8Array(part.value?.data);
+  if (bytes && bytes.byteLength > 0) {
+    const base64 = Buffer.from(bytes).toString('base64');
+    log(`Image part: mimeType=${mimeType}, bytes=${bytes.byteLength}, base64=${base64.length}`);
+    return {
+      type: 'image_url',
+      image_url: {
+        url: `data:${mimeType};base64,${base64}`,
+      },
+    };
+  }
+  const url = part.url || part.value?.url || part.image_url?.url;
+  if (typeof url === 'string') {
+    log(`Image part: using URL ${url.slice(0, 60)}…`);
+    return {
+      type: 'image_url',
+      image_url: {
+        url,
+      },
+    };
+  }
+  log(`Image part skipped: no decodable bytes or url (keys: ${Object.keys(part).join(',')})`);
+  return null;
+}
+
+/**
  * Translate VS Code language-model messages into OpenAI chat-completions format.
  * Text parts are joined; tool use/result parts are mapped to tool_calls / role:"tool".
+ * Image parts are converted to OpenAI vision image_url objects.
  * Logs tool results for debugging multi-turn flows.
  */
 function toOpenAiMessages(messages) {
@@ -701,12 +806,23 @@ function toOpenAiMessages(messages) {
     const texts = [];
     const toolUses = [];
     const toolResults = [];
+    const imageParts = [];
     for (const part of parts) {
       if (isToolUsePart(part)) {
         toolUses.push(part);
       } else if (isToolResultPart(part)) {
         toolResults.push(part);
+      } else if (isImagePart(part)) {
+        const img = toOpenAiImageContent(part);
+        if (img) {
+          imageParts.push(img);
+        }
       } else {
+        // Surface unrecognised binary/mime parts once so image payloads VS Code
+        // sends under a different shape are visible in the output channel.
+        if (part && typeof part === 'object' && ('mimeType' in part || 'data' in part)) {
+          log(`Unrecognised binary part (keys: ${Object.keys(part).join(',')}, mimeType: ${part.mimeType ?? 'n/a'}, ctor: ${part.constructor?.name ?? 'n/a'})`);
+        }
         texts.push(String(partValue(part) ?? JSON.stringify(part ?? '')));
       }
     }
@@ -745,12 +861,34 @@ function toOpenAiMessages(messages) {
         log(`Tool result: ${tr.callId} → ${singleLine}`);
         out.push({ role: 'tool', tool_call_id: tr.callId, content });
       }
-      if (texts.length) {
-        out.push({ role: toOpenAiRole(msg.role), content: texts.join('') });
+      if (texts.length || imageParts.length) {
+        const role = toOpenAiRole(msg.role);
+        if (imageParts.length) {
+          const content = [];
+          const textContent = texts.join('');
+          if (textContent) {
+            content.push({ type: 'text', text: textContent });
+          }
+          content.push(...imageParts);
+          out.push({ role, content });
+        } else {
+          out.push({ role, content: texts.join('') });
+        }
       }
       continue;
     }
-    out.push({ role: toOpenAiRole(msg.role), content: texts.join('') });
+    const role = toOpenAiRole(msg.role);
+    if (imageParts.length) {
+      const content = [];
+      const textContent = texts.join('');
+      if (textContent) {
+        content.push({ type: 'text', text: textContent });
+      }
+      content.push(...imageParts);
+      out.push({ role, content });
+    } else {
+      out.push({ role, content: texts.join('') });
+    }
   }
   return out;
 }

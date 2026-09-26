@@ -59,6 +59,11 @@
           "default": true,
           "description": "Advertise tool-calling capability (needed for Copilot agent mode) and pass tools through to the endpoint."
         },
+        "byokModels.enableVision": {
+          "type": "boolean",
+          "default": true,
+          "description": "Advertise vision / image input capability for models that support it and pass image attachments through to the endpoint."
+        },
         "byokModels.injectWorkspaceContext": {
           "type": "boolean",
           "default": false,
