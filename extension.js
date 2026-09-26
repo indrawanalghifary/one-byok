@@ -522,9 +522,11 @@ class BYOKModelsProvider {
       body.max_tokens = opts.maxTokens;
     }
     const enableTools = settings().get('enableTools', true);
-    const hasImageContent = messagesForModel.some((m) =>
-      Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')
-    );
+    // Only inspect the last (newest) message for images — checking the whole
+    // history would suppress tools forever after the first image appeared.
+    const lastMsg = messagesForModel[messagesForModel.length - 1];
+    const hasImageContent = Array.isArray(lastMsg?.content)
+      && lastMsg.content.some((p) => p.type === 'image_url');
     if (enableTools && options.tools?.length && !hasImageContent) {
       body.tools = options.tools.map((t) => ({
         type: 'function',
@@ -831,9 +833,14 @@ function toOpenAiMessages(messages) {
       }
     }
     if (toolUses.length) {
+      // Assistant message may carry both tool calls and image parts.
+      const content = [];
+      const textContent = texts.join('');
+      if (textContent) content.push({ type: 'text', text: textContent });
+      content.push(...imageParts);
       out.push({
         role: 'assistant',
-        content: texts.join('') || null,
+        content: content.length ? content : null,
         tool_calls: toolUses.map((tc) => ({
           id: tc.callId ?? tc.name,
           type: 'function',
