@@ -81,6 +81,7 @@ works) when the endpoint supports it; disable via `byokModels.enableTools`.
 | `byokModels.maxOutputTokens` | `32768` | Fallback max output (overridden by model's declared limit) |
 | `byokModels.enableTools` | `true` | Advertise + pass through tool calling |
 | `byokModels.enableVision` | `true` | Advertise + pass through image/vision input for models that support it |
+| `byokModels.forceVision` | `false` | Advertise image input for **all** models (only for gateways that reroute images to a vision-capable upstream) |
 | `byokModels.injectWorkspaceContext` | `false` | Inject workspace metadata (files, git, project structure) into system prompts — **disabled by default for local models** |
 | `byokModels.maxWorkspaceContextChars` | `500` | Max chars for workspace context (capped at 25% of model's context window) |
 | `byokModels.debugLogging` | `false` | Enable verbose logging of tool calls and workspace context |

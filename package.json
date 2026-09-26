@@ -64,6 +64,11 @@
           "default": true,
           "description": "Advertise vision / image input capability for models that support it and pass image attachments through to the endpoint."
         },
+        "byokModels.forceVision": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Advertise image input for **every** model, even those the endpoint reports as non-vision. Only enable this when your endpoint/proxy automatically routes image requests to a vision-capable upstream model (e.g. a gateway that silently falls back). With a strict endpoint this will surface HTTP 400 errors when an image is attached to a non-vision model."
+        },
         "byokModels.injectWorkspaceContext": {
           "type": "boolean",
           "default": false,

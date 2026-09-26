@@ -353,6 +353,7 @@ class BYOKModelsProvider {
     }
     const enableTools = settings().get('enableTools', true);
     const enableVision = settings().get('enableVision', true);
+    const forceVision = settings().get('forceVision', false);
     const defaultMaxIn = settings().get('maxInputTokens', 262144);
     const defaultMaxOut = settings().get('maxOutputTokens', 32768);
 
@@ -387,7 +388,10 @@ class BYOKModelsProvider {
           const detailStr = ep.name
             ? `${ep.name} · context: ${maxIn.toLocaleString()} tokens`
             : `context: ${maxIn.toLocaleString()} tokens`;
-          const supportsVision = enableVision && isVisionSupported(m);
+          // forceVision advertises image input for every model so the picker's
+          // paste/drag UI stays enabled even when the endpoint under-reports
+          // capabilities (e.g. a gateway that reroutes images to a vision model).
+          const supportsVision = enableVision && (forceVision || isVisionSupported(m));
           models.push({
             id: `${ep.baseUrl}|${modelName}`,
             name: displayName,
