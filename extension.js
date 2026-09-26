@@ -381,23 +381,29 @@ class BYOKModelsProvider {
           // Use model's declared context window, with a safety margin for output tokens
           const maxIn = Math.min(modelContextWindow, defaultMaxIn);
           const maxOut = Math.min(defaultMaxOut, Math.floor(modelContextWindow * 0.25));
+          const modelName = String(m.id);
+          const displayName = endpoints.length > 1 ? `${modelName} · ${ep.name}` : modelName;
+          const detailStr = ep.name
+            ? `${ep.name} · context: ${maxIn.toLocaleString()} tokens`
+            : `context: ${maxIn.toLocaleString()} tokens`;
           models.push({
-            id: `${ep.baseUrl}|${String(m.id)}`,
-            name: `${String(m.id).split('/').pop()} · ${ep.name}`,
+            id: `${ep.baseUrl}|${modelName}`,
+            name: displayName,
             family: VENDOR,
             version: m.created ? String(m.created) : '1',
             maxInputTokens: maxIn,
             maxOutputTokens: maxOut,
             capabilities: { toolCalling: enableTools, imageInput: false },
             isUserSelectable: true,
-            detail: `${ep.source} · context: ${maxIn.toLocaleString()} tokens`,
+            detail: detailStr,
+            tooltip: `${modelName} · context: ${maxIn.toLocaleString()} tokens`,
             // Ride-along credentials (same pattern as VS Code's built-in BYOK
             // providers): extra properties survive the extension-host round trip
             // and come back on `model` in provideLanguageModelChatResponse.
             baseUrl: ep.baseUrl,
             apiKey: ep.apiKey,
             // Original model id used in the chat/completions request body
-            modelId: String(m.id),
+            modelId: modelName,
             // Store model's declared context window for dynamic workspace context sizing
             contextWindow: modelContextWindow,
           });
