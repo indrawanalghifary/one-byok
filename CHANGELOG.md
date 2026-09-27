@@ -8,16 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Network failures now explain themselves.** A failed request used to surface
+  only as `fetch failed`, which gives no clue what went wrong. The real cause is
+  now read from the error chain and included in both the chat error and the
+  output channel, with a short hint — e.g. `ECONNRESET: socket hang up` plus
+  "commonly a flaky tunnel or proxy". Recognised causes: `ENOTFOUND`/`EAI_AGAIN`,
+  `ECONNREFUSED`, `ECONNRESET`/`EPIPE`, `ETIMEDOUT`, `UND_ERR_*` and TLS
+  certificate errors. Model-discovery warnings include the cause too.
 - **`debugLogging` is now honoured.** The setting was previously declared but
   never read, so the extension always wrote verbose traces (request bodies, SSE
   chunks, tool calls/results, image conversion) to the output channel. Those
-  traces are now gated behind `oneByok.debugLogging`, which defaults to
-  `false` and can be enabled whenever verbose diagnostics are needed. Always-on
-  diagnostics (activation, errors, model discovery, user-triggered commands)
-  are unchanged.
+  traces are now emitted at **Debug** level and stay hidden by default; set
+  `oneByok.debugLogging` to `true` to reveal them.
+- **Silent image failures are no longer silent.** An image part that cannot be
+  decoded, or a binary part that arrives in an unrecognised shape, now logs a
+  **warning** instead of being dropped quietly, so a "vision does not work"
+  report is diagnosable from the output channel.
 
 ### Changed
 
+- **Logging uses severity levels.** The output channel is now a VS Code
+  `LogOutputChannel`, so lines are tagged *Info*, *Warning*, *Error* or *Debug*
+  and can be filtered from the level dropdown in the Output panel. Previously
+  every line was written as undifferentiated text.
+- **Model discovery failures log as warnings** rather than plain info.
+- **A level picked manually in the Output panel is preserved** across window
+  reloads; `oneByok.debugLogging` only overrides it when enabled or explicitly
+  changed.
 - **Rebranded to One-BYOK.** The extension is now published as
   `one-byok.one-byok` with display name **One-BYOK**; the vendor id changed
   from `byok-models` to `one-byok` and the output channel from **BYOK Models**

@@ -24,47 +24,73 @@ const SECRET_KEY = 'oneByokApiKey';
 // "Add model" (Manage Models) UI — mirrors the opencodego pattern (<vendor>.<property>).
 const MANAGED_SECRET_KEY = `${VENDOR}.apiKey`;
 
-/** @type {vscode.OutputChannel | undefined} */
+/** @type {vscode.LogOutputChannel | undefined} */
 let channel;
-
-/**
- * Mirrors `oneByok.debugLogging`. Cached because `logDebug` runs inside the
- * per-chunk SSE loop and must not hit the configuration service every time.
- */
-let debugEnabled = false;
 
 function ensureChannel() {
   if (!channel) {
-    channel = vscode.window.createOutputChannel('One-BYOK');
+    // `log: true` gives the channel severity levels, automatic timestamps and a
+    // level picker in the Output panel instead of a single undifferentiated stream.
+    channel = vscode.window.createOutputChannel('One-BYOK', { log: true });
   }
   return channel;
 }
 
-/** Always-on diagnostics: activation, errors, and user-triggered actions. */
-function log(message) {
-  ensureChannel().appendLine(`[${new Date().toISOString()}] ${message}`);
+/** Informational, always shown: activation and user-triggered actions. */
+function logInfo(message) {
+  ensureChannel().info(message);
+}
+
+/** Warning, always shown: a non-fatal degradation the user should notice. */
+function logWarn(message) {
+  ensureChannel().warn(message);
+}
+
+/** Error, always shown. Pass the caught error to include its message and cause. */
+function logError(message, err) {
+  if (err === undefined) {
+    ensureChannel().error(message);
+    return;
+  }
+  // Network errors surface as a bare "fetch failed"; the reason lives in cause.
+  const cause = describeErrorCause(err);
+  ensureChannel().error(
+    `${message}: ${err?.message ?? err}${cause ? ` (cause: ${cause})` : ''}`
+  );
 }
 
 /**
- * Verbose diagnostics: request bodies, SSE chunks, image conversion details and
- * tool-call parsing. Gated behind `oneByok.debugLogging` (default `false`) so a
- * normal run stays quiet and prompt/response content is not written to the
- * output channel unless the user explicitly opts in.
+ * Verbose trace: request bodies, SSE chunks, image conversion details and
+ * tool-call parsing. Emitted at `debug` level, so it stays hidden unless the
+ * channel level is raised — `oneByok.debugLogging` does that automatically.
+ * Trace lines can contain prompt/response content, which is why they are off
+ * by default.
  */
 function logDebug(message) {
-  if (!debugEnabled) {
-    return;
-  }
-  ensureChannel().appendLine(`[${new Date().toISOString()}] [debug] ${message}`);
+  ensureChannel().debug(message);
 }
 
-/** Refresh the cached debug flag from settings (called on activate + config change). */
-function refreshDebugFlag() {
+/**
+ * Sync the channel level with `oneByok.debugLogging`.
+ *
+ * The level is only written when the setting is enabled, or when reacting to an
+ * explicit change (`explicit`), so a level picked manually from the Output
+ * panel survives window reloads.
+ *
+ * @param {boolean} explicit - true when called in response to a settings change.
+ */
+function applyDebugLoggingSetting(explicit) {
+  let enabled = false;
   try {
-    debugEnabled = settings().get('debugLogging', false) === true;
+    enabled = settings().get('debugLogging', false) === true;
   } catch {
-    debugEnabled = false;
+    enabled = false;
   }
+  if (!enabled && !explicit) {
+    // Never silently lower a level the user may have chosen themselves.
+    return;
+  }
+  ensureChannel().logLevel = enabled ? vscode.LogLevel.Debug : vscode.LogLevel.Info;
 }
 
 // No built-in endpoint: users configure their own OpenAI-compatible server
@@ -79,6 +105,64 @@ const MODEL_CACHE_TTL_MS = 30_000;
 function trimUrl(url) {
   const value = String(url ?? '').trim();
   return value.endsWith('/') ? value.slice(0, -1) : value;
+}
+
+/**
+ * Collect every `cause` in a fetch error chain into one line.
+ *
+ * `fetch()` throws a bare `TypeError: fetch failed` and hides the real reason
+ * (ECONNRESET, ETIMEDOUT, ENOTFOUND, CERT_*…) in `err.cause`, sometimes nested
+ * several levels deep. Without this, a network failure is indistinguishable
+ * from any other error.
+ *
+ * @param {unknown} err
+ * @returns {string} e.g. "ECONNRESET: socket hang up" or '' when nothing is found.
+ */
+function describeErrorCause(err) {
+  const parts = [];
+  const seen = new Set();
+  let current = err?.cause;
+  while (current && parts.length < 4 && !seen.has(current)) {
+    seen.add(current);
+    const code = typeof current.code === 'string' ? current.code : '';
+    const message = typeof current.message === 'string' ? current.message : '';
+    const text = [code, message].filter(Boolean).join(': ');
+    if (text && !parts.includes(text)) {
+      parts.push(text);
+    }
+    current = current.cause;
+  }
+  return parts.join(' ← ');
+}
+
+/**
+ * Turn a network-level failure into something the user can act on.
+ * @param {string} cause
+ * @returns {string|undefined} A hint, or undefined when the cause is unrecognised.
+ */
+function networkHint(cause) {
+  if (!cause) {
+    return undefined;
+  }
+  if (/ENOTFOUND|EAI_AGAIN/i.test(cause)) {
+    return 'The host name could not be resolved — check the base URL host for typos, and your DNS/network.';
+  }
+  if (/ECONNREFUSED/i.test(cause)) {
+    return 'The host refused the connection — the server is not listening on that port, or a firewall is blocking it.';
+  }
+  if (/ECONNRESET|EPIPE|socket hang up/i.test(cause)) {
+    return 'The connection was reset mid-request — commonly a flaky tunnel or proxy. Retry, or point at a more stable endpoint.';
+  }
+  if (/ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|headers timeout|body timeout/i.test(cause)) {
+    return 'The connection timed out — the endpoint may be slow or unreachable right now.';
+  }
+  if (/CERT_|ERR_TLS|self.signed|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(cause)) {
+    return 'TLS certificate validation failed — the endpoint uses a certificate this machine does not trust.';
+  }
+  if (/UND_ERR_SOCKET/i.test(cause)) {
+    return 'The socket closed unexpectedly — usually a network interruption or a proxy dropping the connection.';
+  }
+  return undefined;
 }
 
 /**
@@ -367,7 +451,7 @@ class OneByokProvider {
     // Explicit "Add model" click (options.silent === false) should always offer
     // to add another endpoint, even when some already exist.
     if (!options.silent) {
-      log(
+      logInfo(
         `Add model clicked (${endpoints.length} endpoint(s) configured). Opening Add Endpoint form.`
       );
       void vscode.commands.executeCommand('oneByok.addEndpoint');
@@ -447,11 +531,14 @@ class OneByokProvider {
             contextWindow: modelContextWindow,
           });
         }
-        log(
+        logInfo(
           `Discovered ${payload.data?.length ?? 0} model(s) from ${ep.baseUrl}/models (${ep.source})`
         );
       } catch (err) {
-        log(`Model discovery failed from ${ep.baseUrl}/models: ${err?.message ?? err}`);
+        const cause = describeErrorCause(err);
+        logWarn(
+          `Model discovery failed from ${ep.baseUrl}/models: ${err?.message ?? err}${cause ? ` (cause: ${cause})` : ''}`
+        );
       }
     }
     this._cache = { models, ts: Date.now() };
@@ -467,13 +554,22 @@ class OneByokProvider {
       return await this._doChatResponse(model, messages, options, progress, token);
     } catch (err) {
       const msg = err?.message ?? String(err);
-      log(`provideLanguageModelChatResponse FAILED: ${msg}`);
+      const cause = describeErrorCause(err);
+      logError('provideLanguageModelChatResponse failed', err);
+      if (cause) {
+        // Otherwise 'fetch failed' hides the real reason (ECONNRESET, DNS, TLS…).
+        logError(`Underlying cause: ${cause}`);
+      }
       // Translate common abort reasons into actionable messages
       let friendly = msg;
       if (/terminated|operation was aborted/i.test(msg)) {
         // ponytail: undici AbortError is 'This operation was aborted', a regex
         // also catches 'The operation was aborted' and 'terminated'
         friendly = 'Request timed out or was cancelled. The model may be too slow for the prompt size — try a smaller model, reduce context, or increase the requestTimeoutMs setting.';
+      } else if (/fetch failed/i.test(msg)) {
+        // `fetch failed` alone gives the user nothing to act on; append the cause.
+        const hint = networkHint(cause);
+        friendly = `Could not reach the endpoint${cause ? ` (${cause})` : ''}.${hint ? ` ${hint}` : ' Check the Base URL and that the server is running.'}`;
       }
       // Re-throw so VS Code surfaces the error in the chat UI instead of
       // the generic "Sorry, no response was returned."
@@ -520,7 +616,8 @@ class OneByokProvider {
           logDebug(`Workspace context truncated to ${maxContextChars} chars (${Math.floor(maxContextChars/4).toLocaleString()} tokens)`);
         }
       } catch (ctxErr) {
-        logDebug(`Workspace context gathering failed (continuing without): ${ctxErr?.message ?? ctxErr}`);
+        // Degradation, not fatal: the request continues without workspace context.
+        logWarn(`Workspace context gathering failed (continuing without): ${ctxErr?.message ?? ctxErr}`);
       }
     }
 
@@ -819,7 +916,7 @@ function toOpenAiImageContent(part) {
       },
     };
   }
-  logDebug(`Image part skipped: no decodable bytes or url (keys: ${Object.keys(part).join(',')})`);
+  logWarn(`Image part skipped: no decodable bytes or url (keys: ${Object.keys(part).join(',')})`);
   return null;
 }
 
@@ -860,7 +957,7 @@ function toOpenAiMessages(messages) {
         // Surface unrecognised binary/mime parts once so image payloads VS Code
         // sends under a different shape are visible in the output channel.
         if (part && typeof part === 'object' && ('mimeType' in part || 'data' in part)) {
-          logDebug(`Unrecognised binary part (keys: ${Object.keys(part).join(',')}, mimeType: ${part.mimeType ?? 'n/a'}, ctor: ${part.constructor?.name ?? 'n/a'})`);
+          logWarn(`Unrecognised binary part (keys: ${Object.keys(part).join(',')}, mimeType: ${part.mimeType ?? 'n/a'}, ctor: ${part.constructor?.name ?? 'n/a'})`);
         }
         texts.push(String(partValue(part) ?? JSON.stringify(part ?? '')));
       }
@@ -966,9 +1063,9 @@ async function* sseData(body) {
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
-  channel = vscode.window.createOutputChannel('One-BYOK');
+  channel = vscode.window.createOutputChannel('One-BYOK', { log: true });
   context.subscriptions.push(channel);
-  refreshDebugFlag();
+  applyDebugLoggingSetting(false);
 
   const provider = new OneByokProvider(context);
   context.subscriptions.push(provider);
@@ -978,7 +1075,7 @@ function activate(context) {
   try {
     context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(VENDOR, provider));
   } catch (err) {
-    log(`Failed to register language model provider (lm API may not be available): ${err?.message ?? err}`);
+    logError('Failed to register language model provider (lm API may not be available)', err);
   }
 
   context.subscriptions.push(
@@ -993,14 +1090,19 @@ function activate(context) {
       }
       const trimmed = key.trim();
       if (!trimmed) {
-        log('Set API Key cancelled: input was empty; nothing stored.');
+        logInfo('Set API Key cancelled: input was empty; nothing stored.');
         void vscode.window.showWarningMessage('One-BYOK: empty key — nothing stored.');
         return;
       }
       await context.secrets.store(MANAGED_SECRET_KEY, trimmed);
       const readBack = await context.secrets.get(MANAGED_SECRET_KEY);
       const readStatus = readBack?.length ? `ok len=${readBack.length}` : 'FAILED';
-      log(`API key stored (read-back: ${readStatus}).`);
+      if (readBack?.length) {
+        logInfo(`API key stored (read-back: ${readStatus}).`);
+      } else {
+        // Storing appeared to succeed but the value cannot be read back.
+        logWarn(`API key stored but read-back ${readStatus}.`);
+      }
       provider.fireChanged();
       void vscode.window.showInformationMessage('One-BYOK: API key stored. Model list will refresh automatically.');
     })
@@ -1079,14 +1181,14 @@ function activate(context) {
       await context.secrets.delete(MANAGED_SECRET_KEY);
       await context.secrets.delete(SECRET_KEY);
       provider.fireChanged();
-      log('API key cleared (managed + legacy).');
+      logInfo('API key cleared (managed + legacy).');
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('oneByok.refreshModels', () => {
       provider.fireChanged();
-      log('Manual refresh requested.');
+      logInfo('Manual refresh requested.');
     })
   );
 
@@ -1094,8 +1196,8 @@ function activate(context) {
     vscode.commands.registerCommand('oneByok.showWorkspaceContext', async () => {
       const wsCtx = await gatherWorkspaceContext();
       const contextStr = buildWorkspaceContextPrompt(wsCtx);
-      log('=== Workspace Context Snapshot ===');
-      log(contextStr);
+      logInfo('=== Workspace Context Snapshot ===');
+      logInfo(contextStr);
       await vscode.window.showInformationMessage(
         `Workspace context gathered: ${wsCtx.openFiles.length} open files, ${wsCtx.workspaceFolders.length} folders. Check One-BYOK output channel for details.`
       );
@@ -1105,7 +1207,7 @@ function activate(context) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('oneByok')) {
-        refreshDebugFlag();
+        applyDebugLoggingSetting(true);
         provider.fireChanged();
       }
     })
@@ -1115,13 +1217,13 @@ function activate(context) {
   context.subscriptions.push(
     context.secrets.onDidChange((e) => {
         if (e.key === MANAGED_SECRET_KEY || e.key === SECRET_KEY || e.key === `${VENDOR}.baseUrl`) {
-        log(`Secret changed: ${e.key} — refreshing model list.`);
+        logInfo(`Secret changed: ${e.key} — refreshing model list.`);
         provider.fireChanged();
       }
     })
   );
 
-  log('One-BYOK provider activated.');
+  logInfo('One-BYOK provider activated.');
 }
 
 function deactivate() {

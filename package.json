@@ -77,7 +77,7 @@
         "oneByok.debugLogging": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Write verbose traces (request bodies, SSE chunks, tool calls and results, image conversion) to the **One-BYOK** output channel. Disabled by default: traces may contain prompt and response content."
+          "markdownDescription": "Raise the **One-BYOK** output channel to **Debug** level, adding verbose traces (request bodies, SSE chunks, tool calls and results, image conversion). Disabled by default: traces may contain prompt and response content. You can also change the level from the Output panel dropdown."
         },
         "oneByok.maxWorkspaceContextChars": {
           "type": "number",

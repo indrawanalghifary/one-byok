@@ -104,7 +104,7 @@ works) when the endpoint supports it; disable via `oneByok.enableTools`.
 | `oneByok.forceVision` | `false` | Advertise image input for **all** models (only for gateways that reroute images to a vision-capable upstream) |
 | `oneByok.injectWorkspaceContext` | `false` | Inject workspace metadata (files, git, project structure) into system prompts — **disabled by default for local models** |
 | `oneByok.maxWorkspaceContextChars` | `500` | Max chars for workspace context (capped at 25% of model's context window) |
-| `oneByok.debugLogging` | `false` | Write verbose traces (request bodies, SSE chunks, tool calls/results, image conversion) to the output channel. Off by default — traces may contain prompt/response content |
+| `oneByok.debugLogging` | `false` | Raise the output channel to **Debug** level (request bodies, SSE chunks, tool calls/results, image conversion). Off by default — traces may contain prompt/response content |
 | `oneByok.requestTimeoutMs` | `300000` | Request timeout in ms (5 min default) |
 
 ## Dynamic Context Window Adaptation (v0.2.9+)
@@ -168,16 +168,29 @@ the way they do, or for troubleshooting if context isn't being picked up.
 ## Tool Calling & Multi-Turn Interactions
 
 Tool calls and results are passed through faithfully, and multi-turn flows preserve the
-full conversation state, enabling iterative problem-solving in agent mode.
+full conversation state, enabling iterative problem-solving in agent mode. Tracing of
+those flows is available — see [Logging](#logging).
 
-Detailed tracing (tool calls, tool results, request bodies, SSE chunks, image conversion)
-is **off by default**. Enable `oneByok.debugLogging` to write these traces to the
-**One-BYOK** output channel (View → Output → select "One-BYOK"). Because those traces
-include prompt and response content, leave the setting off unless you are actively
-debugging.
+## Logging
 
-Errors, model-discovery results, and actions you trigger from the Command Palette are
-always logged, so the channel stays useful without enabling debug mode.
+The **One-BYOK** output channel (View → Output → select "One-BYOK") uses VS Code log
+levels, so you can filter it from the level dropdown in the Output panel:
+
+| Level | Contents |
+|---|---|
+| **Info** | Activation, model discovery results, and actions you trigger from the Command Palette |
+| **Warning** | Non-fatal degradations you should notice — e.g. an image part that could not be converted and was therefore dropped, or workspace context that failed to gather |
+| **Error** | Failed chat requests, with the underlying cause |
+| **Debug** | Verbose traces: request bodies, SSE chunks, tool calls/results, image conversion details |
+
+Only Info and above are emitted by default. Set `oneByok.debugLogging` to `true` to raise
+the level to **Debug** — because traces include prompt and response content, leave it off
+unless you are actively debugging. You can also pick a level manually from the Output panel
+dropdown; that choice is kept across window reloads unless you change `oneByok.debugLogging`
+again.
+
+The channel is in-memory only: nothing is written to disk, and no server or MCP endpoint is
+exposed. To share a log, copy it from the Output panel.
 
 ## Advanced: MCP Server Integration (Future)
 
@@ -208,6 +221,32 @@ For now, tools are limited to what VS Code provides natively. Stay tuned for MCP
 1. Verify `oneByok.enableTools` is `true`.
 2. Ensure your endpoint supports OpenAI's tool-calling format.
 3. Check the **One-BYOK** output channel for tool call logs and errors.
+
+### "Could not reach the endpoint"
+
+When a request fails at the network level, the message names the underlying cause
+instead of the unhelpful bare `fetch failed`:
+
+```
+One-BYOK: Could not reach the endpoint (ECONNRESET: socket hang up).
+The connection was reset mid-request — commonly a flaky tunnel or proxy.
+Retry, or point at a more stable endpoint.
+```
+
+Recognised causes and what they mean:
+
+| Cause | Meaning |
+|---|---|
+| `ENOTFOUND` / `EAI_AGAIN` | Host name could not be resolved — check the Base URL host and your DNS |
+| `ECONNREFUSED` | Nothing is listening on that host/port, or a firewall blocked it |
+| `ECONNRESET` / `socket hang up` | Connection reset mid-request — often a flaky tunnel or proxy |
+| `ETIMEDOUT` / connect timeout | Endpoint is slow or unreachable |
+| `CERT_*` / TLS errors | The endpoint's certificate is not trusted by this machine |
+
+Note that model discovery and chat requests are separate calls, so it is possible for
+discovery to succeed while a chat request fails — a symptom of an unstable endpoint
+rather than a misconfiguration. The same detail is written to the output channel, so
+enabling `oneByok.debugLogging` gives you the full picture.
 
 ### Enable debug logging
 
