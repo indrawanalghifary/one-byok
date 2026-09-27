@@ -2,7 +2,7 @@
   "name": "one-byok",
   "displayName": "One-BYOK — OpenAI-Compatible Provider",
   "description": "Bring your own OpenAI-compatible API provider to GitHub Copilot. Configure a Base URL and API Key, and One-BYOK discovers available models automatically and detects vision capabilities per model.",
-  "version": "0.2.20",
+  "version": "0.3.0",
   "publisher": "one-byok",
   "icon": "icon.png",
   "repository": {
@@ -94,6 +94,21 @@
           "default": [],
           "scope": "application",
           "markdownDescription": "OpenAI-compatible endpoints (each `{ baseUrl, apiKey, name? }`). Use the command **One-BYOK: Add Endpoint** to add endpoints; they are stored here and persist across workspaces. An optional `name` labels the endpoint in the model picker (falls back to the URL host)."
+        },
+        "oneByok.maxRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "scope": "application",
+          "markdownDescription": "How many times to retry the **selected** model when the request fails for a transient reason (network error, DNS failure, timeout, HTTP 429/500/502/503/504). Default `2`. Set to `0` to disable retrying. Auth errors (401/403) and bad requests (400/404) are never retried — only model failures that may pass on a second try."
+        },
+        "oneByok.fallbackModels": {
+          "type": "array",
+          "default": [],
+          "scope": "application",
+          "items": { "type": "string" },
+          "markdownDescription": "Ordered list of backup model ids to try, in order, when the selected model ultimately fails (after `oneByok.maxRetries` attempts). **Disabled by default** — an empty list preserves the original behaviour. Each entry is a model id exactly as it appears in the model picker, optionally suffixed with `@ <endpoint host or name>` when several endpoints expose the same id (e.g. `\"qwen3-coder @ ollama.local\"`). Fallback is only attempted **before any output has been streamed**: once a reply has started, switching models would duplicate the answer and could run a tool call twice, so the request fails instead. Models must be reachable on one of the endpoints in `oneByok.endpoints`. When a fallback is used you get a warning message naming the model that answered."
         }
       }
     },

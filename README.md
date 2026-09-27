@@ -106,6 +106,81 @@ works) when the endpoint supports it; disable via `oneByok.enableTools`.
 | `oneByok.maxWorkspaceContextChars` | `500` | Max chars for workspace context (capped at 25% of model's context window) |
 | `oneByok.debugLogging` | `false` | Raise the output channel to **Debug** level (request bodies, SSE chunks, tool calls/results, image conversion). Off by default — traces may contain prompt/response content |
 | `oneByok.requestTimeoutMs` | `300000` | Request timeout in ms (5 min default) |
+| `oneByok.maxRetries` | `2` | How many times to retry the **selected** model on a transient failure. `0` disables retrying |
+| `oneByok.fallbackModels` | `[]` | Ordered list of backup model ids. **Empty = disabled** (default) |
+
+## Reliability: retries and fallback models
+
+Requests can fail for reasons that have nothing to do with the prompt: a tunnel drops,
+a gateway rate-limits, or a model is briefly overloaded. Two opt-in layers handle that.
+
+### Retrying the same model
+
+`oneByok.maxRetries` (default `2`) repeats the request against the **same** model when the
+failure looks transient:
+
+| Retried | Not retried |
+|---|---|
+| Network errors, DNS failures, timeouts | HTTP `401`/`403` (wrong API key) |
+| HTTP `408`, `409`, `425`, `429`, `500`, `502`, `503`, `504` | HTTP `400`, `404`, `422` (bad model, bad request) |
+
+Backoff uses exponential delay with jitter, capped at 4 seconds. A `429` (or any 5xx) adds a
+short pause before the fallback model is tried, so a throttled upstream is not hammered again.
+
+### Falling back to another model
+
+Set `oneByok.fallbackModels` to an ordered list of model ids to try when the selected model
+ultimately fails:
+
+```json
+{
+  "oneByok.maxRetries": 2,
+  "oneByok.fallbackModels": ["qwen3-coder-30b", "llama-3.3-70b"]
+}
+```
+
+Each entry is tried in order. If several endpoints expose the same model id, disambiguate with
+`@`:
+
+```json
+{ "oneByok.fallbackModels": ["qwen3-coder @ ollama.local", "gpt-4o @ work-gateway"] }
+```
+
+The part after `@` matches an endpoint's `name` or its host. Entries that match nothing are
+skipped with a warning instead of breaking the chain. Fallback models are only used if they are
+reachable through an endpoint listed in `oneByok.endpoints`.
+
+**When you are told.** A silent substitution would be confusing, so whenever a fallback model
+answers you get a message naming both models, and the same detail is written to the output
+channel.
+
+### Why fallback stops once a reply has started
+
+Fallback is only attempted **before the first part of the reply is streamed**. Once text has
+reached the chat, switching models would append a second, contradictory answer under a
+half-finished one, so the request fails with an explanation instead:
+
+```
+One-BYOK: gateway dropped — output had already started streaming,
+so the request cannot be retried or replaced by a fallback model.
+```
+
+Tool calls are not affected by this rule: they are handed to the chat only after the stream
+finishes, so an interrupted tool call was never delivered and can never run twice.
+
+### Errors hidden inside HTTP 200
+
+Some gateways (vLLM, LiteLLM, Ollama, OpenRouter) reply `200` and then report the failure *in*
+the response body or as an SSE element:
+
+```json
+{"error": {"message": "vllm: out of memory", "code": "oom"}}
+```
+
+That is now treated as a real failure. It is retried, it triggers fallback, and the server's own
+message is shown rather than the bare "no response was returned" it used to produce. The same
+applies when a gateway returns `200` with a plain JSON body instead of an SSE stream — the body
+is quoted so you can see what it actually said.
 
 ## Dynamic Context Window Adaptation (v0.2.9+)
 

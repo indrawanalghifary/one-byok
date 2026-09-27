@@ -166,6 +166,155 @@ function networkHint(cause) {
 }
 
 /**
+ * Mark an error as "output already reached the chat".
+ *
+ * Once a text part has been reported, a retry would duplicate it and a failover
+ * would replace half a sentence the user is already reading, so the
+ * orchestration layer refuses to continue and fails honestly instead.
+ *
+ * Note that tool calls are deliberately NOT part of this check: they are only
+ * handed to the chat after the whole stream completes, so an interrupted tool
+ * call was never delivered and cannot be executed twice.
+ *
+ * @param {unknown} err
+ * @param {boolean} started - Whether any part was already reported.
+ * @returns {Error}
+ */
+function throwWithStreaming(err, started) {
+  const error = err instanceof Error ? err : new Error(String(err));
+  if (started) {
+    error.streamingStarted = true;
+  }
+  return error;
+}
+
+/** An HTTP response with a non-2xx status, carrying the parsed server message. */
+class HttpError extends Error {
+  /**
+   * @param {number} status
+   * @param {string} message - Already-parsed server message, not raw JSON.
+   * @param {string} [body] - Raw body, kept for debug logging only.
+   */
+  constructor(status, message, body) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/** HTTP statuses worth trying again: rate limits and transient upstream failures. */
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * Pull a human-readable message out of an error response body.
+ *
+ * OpenAI-compatible servers disagree on shape — `{ error: { message } }`,
+ * `{ error: "..." }`, `{ message }`, `{ detail }` (FastAPI), or a plain text
+ * body. Pasting the raw JSON into the chat is unreadable, so normalise here.
+ *
+ * @param {unknown} payload - Parsed JSON, a JSON string, or raw text.
+ * @returns {string} '' when no message could be extracted.
+ */
+function errorMessageFromBody(payload) {
+  if (payload === undefined || payload === null) {
+    return '';
+  }
+  let value = payload;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) {
+      return '';
+    }
+    // A JSON string that failed to parse upstream is still worth probing.
+    if (text.startsWith('{') || text.startsWith('[')) {
+      try {
+        const nested = errorMessageFromBody(JSON.parse(text));
+        if (nested) {
+          return nested;
+        }
+      } catch {
+        // Not valid JSON after all — fall through and use the raw text.
+      }
+    }
+    return text;
+  }
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+  const obj = /** @type {Record<string, any>} */ (value);
+  // `error` may itself be a string, an object, or a nested array (LiteLLM-style).
+  if (obj.error !== undefined && obj.error !== null) {
+    if (typeof obj.error === 'object') {
+      const inner = obj.error.message ?? obj.error.detail ?? obj.error.code;
+      if (inner) {
+        return errorMessageFromBody(inner);
+      }
+    } else {
+      const nested = errorMessageFromBody(obj.error);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  for (const key of ['message', 'detail', 'reason', 'error_description', 'msg']) {
+    if (obj[key]) {
+      const nested = errorMessageFromBody(obj[key]);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * Decide whether a failure is worth retrying (same model) or failing over
+ * (another model), and describe it succinctly.
+ *
+ * @param {unknown} err
+ * @returns {{ kind: 'streaming'|'server'|'network'|'auth'|'fatal', retryable: boolean, status?: number, detail: string }}
+ */
+function classifyError(err) {
+  const status = typeof err?.status === 'number' ? err.status : undefined;
+  const cause = describeErrorCause(err);
+  const message = String(err?.message ?? err ?? '');
+  if (err?.streamingStarted) {
+    // Output already reached the chat — nothing may be replayed.
+    return { kind: 'streaming', retryable: false, status, detail: message };
+  }
+  if (status !== undefined) {
+    if (status === 401 || status === 403) {
+      // Wrong/expired key: retrying another model on the same endpoint is futile.
+      return { kind: 'auth', retryable: false, status, detail: message };
+    }
+    if (RETRYABLE_STATUS.has(status)) {
+      return { kind: 'server', retryable: true, status, detail: message };
+    }
+    // 400/404/422 and friends: wrong model name, unsupported parameter. Another
+    // model on the same endpoint is a genuinely sensible next step.
+    return { kind: 'fatal', retryable: false, status, detail: message };
+  }
+  if (/aborted|terminated|timed? ?out/i.test(message) && !cause) {
+    return { kind: 'network', retryable: false, status, detail: message };
+  }
+  // No HTTP status at all means the request never completed a round trip
+  // (DNS, TCP, TLS, reset tunnel) — the cheapest failures to retry.
+  return { kind: 'network', retryable: true, status, detail: cause ? `${message} (${cause})` : message };
+}
+
+/** Exponential backoff with jitter, capped so a fallback never feels hung. */
+function retryDelayMs(attempt) {
+  const base = Math.min(500 * 2 ** attempt, 4000);
+  return base + Math.floor(Math.random() * 250);
+}
+
+/** Await a duration; used for retry backoff. */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Values entered through VS Code's native "Add model" UI are stored by VS Code
  * itself (secrets under internal `chat.lm.secret.*` keys, the rest in its
  * language-models config file) and handed to the provider via
@@ -548,50 +697,227 @@ class OneByokProvider {
   /**
    * Streams a chat completion and reports text/tool-call parts as they arrive.
    * Injects workspace context into the request when enabled.
+   *
+   * Resilience layers, in order:
+   *   1. Retry the SAME model for transient failures (`oneByok.maxRetries`).
+   *   2. Fail over to the next entry of `oneByok.fallbackModels`.
+   * Both are only allowed before the first byte reaches the chat — see
+   * `throwWithStreaming`.
    */
   async provideLanguageModelChatResponse(model, messages, options, progress, token) {
+    // Fallback is opt-in: with an empty list the loop runs once and the
+    // original single-attempt behaviour is preserved exactly.
+    const primary = await this.describeTarget(model);
+    const candidates = [primary];
+    for (const fb of this.resolveFallbackTargets(primary.baseUrl)) {
+      // Never retry the model the user actually picked.
+      if (!candidates.some((c) => c.baseUrl === fb.baseUrl && c.modelId === fb.modelId)) {
+        candidates.push(fb);
+      }
+    }
+    const maxRetries = Math.max(0, Math.min(5, Number(settings().get('maxRetries', 2)) || 0));
+
+    const seenTargets = [];
+    /** Endpoints whose credentials were rejected; another model there cannot help. */
+    const rejectedEndpoints = new Set();
+    /** @type {unknown} */
+    let lastError;
+
+    for (let idx = 0; idx < candidates.length; idx++) {
+      const target = candidates[idx];
+      const isPrimary = idx === 0;
+
+      if (rejectedEndpoints.has(target.baseUrl)) {
+        logWarn(
+          `Skipping fallback "${target.modelId}" — the credentials for ${target.baseUrl} were already rejected.`
+        );
+        continue;
+      }
+      if (!isPrimary) {
+        logWarn(`Falling back from "${primary.modelId}" to "${target.modelId}" @ ${target.baseUrl}.`);
+      }
+
+      seenTargets.push(`${target.modelId} @ ${target.baseUrl}`);
+      // Retries apply to the model the user picked. A fallback model is already
+      // the second chance, so it gets a single shot.
+      const attempts = 1 + (isPrimary ? maxRetries : 0);
+
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const result = await this._runFinishAttempt(target, messages, options, progress, token);
+
+        if (result.ok) {
+          if (!isPrimary) {
+            logWarn(`Answered by fallback model "${target.modelId}" after "${primary.modelId}" failed.`);
+            // Silent substitution would be surprising: the user chose a model
+            // and got another one, so say so.
+            void vscode.window.showWarningMessage(
+              `One-BYOK: "${primary.modelId}" failed — the request was answered by the fallback model "${target.modelId}".`
+            );
+          } else if (attempt > 0) {
+            logInfo(`Recovered after ${attempt} retry(ies) with "${target.modelId}".`);
+          }
+          return;
+        }
+
+        lastError = result.err;
+        const failure = classifyError(lastError);
+        logError(`Attempt ${attempt + 1}/${attempts} for "${target.modelId}" failed [${failure.kind}]`, lastError);
+
+        if (failure.kind === 'streaming') {
+          // Output already reached the chat: repeating it would duplicate text
+          // and the user is already reading half an answer.
+          throw new Error(
+            `One-BYOK: ${failure.detail} — output had already started streaming, so the request cannot be retried or replaced by a fallback model.`
+          );
+        }
+        // A user-initiated stop is deliberate, not a failure to work around.
+        if (token?.isCancellationRequested) {
+          throw new Error('One-BYOK: Request cancelled.');
+        }
+        if (failure.kind === 'auth') {
+          // The key is wrong, not the model: every other model on this host
+          // would fail identically, so rule the whole endpoint out.
+          rejectedEndpoints.add(target.baseUrl);
+          logWarn(`HTTP ${failure.status} from ${target.baseUrl} — skipping its remaining fallback models.`);
+          break;
+        }
+        // A bad request (unknown model, unsupported parameter) is worth trying
+        // on another model, so fall through to the next candidate.
+        if (!failure.retryable) {
+          break;
+        }
+        if (attempt < attempts - 1) {
+          const delay = retryDelayMs(attempt);
+          logInfo(`Retrying "${target.modelId}" in ${delay}ms (attempt ${attempt + 2}/${attempts}).`);
+          await sleep(delay);
+          continue;
+        }
+        if (failure.kind === 'server' && failure.status === 429) {
+          // The whole upstream is throttling; give it a moment before a
+          // fallback model hammers the same host.
+          await sleep(1000);
+        }
+      }
+    }
+
+    // Every candidate failed — surface the reason from the model the user chose.
+    const finalFailure = classifyError(lastError);
+    logError(`All candidate model(s) failed (${seenTargets.length} tried): ${seenTargets.join(' → ')}`);
+    if (seenTargets.length === 1) {
+      throw new Error(`One-BYOK: ${finalFailure.detail}`);
+    }
+    throw new Error(
+      `One-BYOK: "${primary.modelId}" failed (${finalFailure.detail}) — ${seenTargets.length - 1} fallback model(s) also failed.`
+    );
+  }
+
+  /**
+   * One streaming attempt against a single target.
+   *
+   * Never throws: the caller decides whether to retry or fail over, which it can
+   * only do once it knows how far the attempt got.
+   *
+   * @returns {Promise<{ ok: true } | { ok: false, err: unknown }>}
+   */
+  async _runFinishAttempt(target, messages, options, progress, token) {
     try {
-      return await this._doChatResponse(model, messages, options, progress, token);
+      await this._doChatResponse(target, messages, options, progress, token);
+      return { ok: true };
     } catch (err) {
-      const msg = err?.message ?? String(err);
-      const cause = describeErrorCause(err);
-      logError('provideLanguageModelChatResponse failed', err);
-      if (cause) {
-        // Otherwise 'fetch failed' hides the real reason (ECONNRESET, DNS, TLS…).
-        logError(`Underlying cause: ${cause}`);
-      }
-      // Translate common abort reasons into actionable messages
-      let friendly = msg;
-      if (/terminated|operation was aborted/i.test(msg)) {
-        // ponytail: undici AbortError is 'This operation was aborted', a regex
-        // also catches 'The operation was aborted' and 'terminated'
-        friendly = 'Request timed out or was cancelled. The model may be too slow for the prompt size — try a smaller model, reduce context, or increase the requestTimeoutMs setting.';
-      } else if (/fetch failed/i.test(msg)) {
-        // `fetch failed` alone gives the user nothing to act on; append the cause.
-        const hint = networkHint(cause);
-        friendly = `Could not reach the endpoint${cause ? ` (${cause})` : ''}.${hint ? ` ${hint}` : ' Check the Base URL and that the server is running.'}`;
-      }
-      // Re-throw so VS Code surfaces the error in the chat UI instead of
-      // the generic "Sorry, no response was returned."
-      throw new Error(`One-BYOK: ${friendly}`);
+      return { ok: false, err };
     }
   }
 
-  /** @private */
-  async _doChatResponse(model, messages, options, progress, token) {
-    // Credentials discovered during provideLanguageModelChatInformation ride along
-    // on the model object; fall back to secret storage / settings if absent.
-    let base = trimUrl(model?.baseUrl);
+  /**
+   * Turn the selected model (or the configured base URL as a last resort) into
+   * a concrete request target.
+   *
+   * @param {any} model
+   * @returns {Promise<{ baseUrl: string, apiKey: string, modelId: string, contextWindow: number|undefined }>}
+   */
+  async describeTarget(model) {
+    let baseUrl = trimUrl(model?.baseUrl);
     let apiKey = String(model?.apiKey ?? '').trim();
-    if (!base) {
-      base = (await resolveBaseUrl(this.context)).url;
+    if (!baseUrl) {
+      baseUrl = (await resolveBaseUrl(this.context)).url;
     }
     if (!apiKey) {
       apiKey = await this.resolveApiKey();
     }
-    if (!base) {
+    if (!baseUrl) {
       throw new Error('One-BYOK is not configured (missing base URL).');
     }
+    return {
+      baseUrl,
+      apiKey,
+      modelId: String(model?.modelId ?? model?.id ?? ''),
+      contextWindow: Number(model?.contextWindow) || undefined,
+    };
+  }
+
+  /**
+   * Resolve `oneByok.fallbackModels` (a list of model ids) against the
+   * configured endpoints, so each entry inherits that endpoint's credentials.
+   *
+   * An entry may be written as `modelId` or `modelId @ <endpoint host/name>`
+   * to disambiguate when several endpoints expose the same model id. Unknown
+   * ids are skipped with a warning rather than failing the fallback chain.
+   *
+   * @param {string} primaryBaseUrl - Endpoint of the user's chosen model, used
+   *   as the default home for bare model ids when several endpoints exist.
+   * @returns {{ baseUrl: string, apiKey: string, modelId: string }[]}
+   */
+  resolveFallbackTargets(primaryBaseUrl) {
+    const configured = settings().get('fallbackModels', []);
+    if (!Array.isArray(configured)) {
+      return [];
+    }
+    const endpoints = resolveEndpoints();
+    const out = [];
+    for (const raw of configured) {
+      const entry = String(raw ?? '').trim();
+      if (!entry) {
+        continue;
+      }
+      const at = entry.lastIndexOf('@');
+      const modelId = at > 0 ? entry.slice(0, at).trim() : entry;
+      const hint = at > 0 ? entry.slice(at + 1).trim().toLowerCase() : '';
+      let match;
+      if (hint) {
+        match = endpoints.find((ep) => {
+          return (
+            endpointName(ep.name, ep.baseUrl).toLowerCase() === hint ||
+            ep.baseUrl.toLowerCase() === hint ||
+            ep.baseUrl.toLowerCase().includes(hint)
+          );
+        });
+      } else {
+        // A bare model id belongs to whichever endpoint already serves the
+        // chosen model; with a single endpoint that is always the right answer.
+        match = endpoints.find((ep) => ep.baseUrl === primaryBaseUrl)
+          ?? (endpoints.length === 1 ? endpoints[0] : undefined);
+      }
+      if (!match) {
+        logWarn(
+          `Fallback model "${entry}" could not be matched to a configured endpoint — skipping it.`
+        );
+        continue;
+      }
+      out.push({ baseUrl: match.baseUrl, apiKey: match.apiKey, modelId });
+    }
+    return out;
+  }
+
+  /**
+   * Perform one streaming request against `target` and report parts as they
+   * arrive.
+   *
+   * @param {{ baseUrl: string, apiKey: string, modelId: string, contextWindow: number|undefined }} target
+   * @returns {Promise<void>}
+   */
+  async _doChatResponse(target, messages, options, progress, token) {
+    const base = target.baseUrl;
+    const apiKey = target.apiKey;
 
     // Gather and optionally inject workspace context.
     // Dynamically size workspace context based on model's declared context window.
@@ -600,7 +926,7 @@ class OneByokProvider {
     const injectContext = settings().get('injectWorkspaceContext', false);
     const maxContextCharsSetting = settings().get('maxWorkspaceContextChars', 500);
     // Model's declared context window (from /v1/models metadata), fallback to setting
-    const modelContextWindow = model.contextWindow ?? settings().get('maxInputTokens', 262144);
+    const modelContextWindow = target.contextWindow ?? settings().get('maxInputTokens', 262144);
     // Heuristic: ~4 chars per token, reserve 75% for conversation, use up to 25% for workspace
     const dynamicMaxContextChars = Math.floor((modelContextWindow * 0.25) * 4);
     const maxContextChars = Math.min(maxContextCharsSetting, dynamicMaxContextChars);
@@ -640,7 +966,7 @@ class OneByokProvider {
     }
 
     const body = {
-      model: model.modelId ?? model.id,
+      model: target.modelId,
       messages: messagesForModel,
       stream: true,
     };
@@ -685,44 +1011,75 @@ class OneByokProvider {
     });
     logDebug(`HTTP response: ${res.status} ${res.statusText}`);
     if (!res.ok) {
-      const detail = (await res.text()).slice(0, 300);
-      throw new Error(`chat/completions failed: HTTP ${res.status} ${detail}`);
+      throw await this.httpError(res);
     }
 
     /** @type {Map<number, { id: string, name: string, args: string }>} */
     const toolAcc = new Map();
     let textContent = '';
-    for await (const data of sseData(res.body)) {
-      // Verbose: raw SSE payloads are large and contain prompt/response content.
-      logDebug(`SSE data: ${data.length > 200 ? data.slice(0, 200) + '...' : data}`);
-      if (data === '[DONE]') {
-        break;
-      }
-      let json;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      const delta = json.choices?.[0]?.delta ?? {};
-      if (delta.content) {
-        textContent += delta.content;
-        progress.report(new vscode.LanguageModelTextPart(delta.content));
-      }
-      for (const tc of delta.tool_calls ?? []) {
-        const idx = tc.index ?? 0;
-        const acc = toolAcc.get(idx) ?? { id: '', name: '', args: '' };
-        if (tc.id) {
-          acc.id = tc.id;
+    // Set before reporting anything: the orchestration layer needs to know that
+    // the reply is no longer replaceable once output has been shown.
+    let started = false;
+    // Clear any body captured by a previous request, so a diagnostic message can
+    // never quote the response of an unrelated call.
+    sseData.lastBody = '';
+    try {
+      for await (const data of sseData(res.body)) {
+        // Verbose: raw SSE payloads are large and contain prompt/response content.
+        logDebug(`SSE data: ${data.length > 200 ? data.slice(0, 200) + '...' : data}`);
+        if (data === '[DONE]') {
+          break;
         }
-        if (tc.function?.name) {
-          acc.name += tc.function.name;
+        let json;
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
         }
-        if (tc.function?.arguments) {
-          acc.args += tc.function.arguments;
+        // Some gateways answer 200 and then report the failure in the stream
+        // (vLLM, LiteLLM, OpenRouter). Ignoring it made the request look like it
+        // succeeded with an empty reply, which is impossible to diagnose.
+        if (json.error) {
+          const detail = errorMessageFromBody(json.error) || 'the endpoint reported an error';
+          throw throwWithStreaming(new Error(detail), started);
         }
-        toolAcc.set(idx, acc);
+        const delta = json.choices?.[0]?.delta ?? {};
+        if (delta.content) {
+          started = true;
+          textContent += delta.content;
+          progress.report(new vscode.LanguageModelTextPart(delta.content));
+        }
+        for (const tc of delta.tool_calls ?? []) {
+          const idx = tc.index ?? 0;
+          const acc = toolAcc.get(idx) ?? { id: '', name: '', args: '' };
+          if (tc.id) {
+            acc.id = tc.id;
+          }
+          if (tc.function?.name) {
+            acc.name += tc.function.name;
+          }
+          if (tc.function?.arguments) {
+            acc.args += tc.function.arguments;
+          }
+          toolAcc.set(idx, acc);
+        }
       }
+    } catch (err) {
+      throw throwWithStreaming(err, started);
+    }
+
+    // A non-SSE body (a plain JSON error, or `{choices:[...]}` from a server
+    // that ignores stream:true) yields no parts at all. Silently returning
+    // nothing is what produced the useless "Sorry, no response was returned.",
+    // so report whatever the server actually said.
+    if (!started && toolAcc.size === 0) {
+      const raw = sseData.lastBody;
+      const detail = errorMessageFromBody(raw) || raw;
+      logDebug(`No streamed content. Raw body: ${raw.slice(0, 300) || '(empty)'}`);
+      throw new Error(
+        'the endpoint returned HTTP 200 but no streamed content' +
+          (detail ? ` — it sent: ${detail.slice(0, 200)}` : '')
+      );
     }
 
     // Log tool calls for debugging/tracing and validate args
@@ -772,6 +1129,30 @@ class OneByokProvider {
     if (textContent) {
       logDebug(`Response: ${textContent.length} characters`);
     }
+  }
+
+  /**
+   * Read an error response body and turn it into an HttpError carrying the
+   * server's own message.
+   *
+   * @param {Response} res
+   * @returns {Promise<HttpError>}
+   */
+  async httpError(res) {
+    const raw = (await res.text().catch(() => '')).slice(0, 1000);
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = raw;
+    }
+    const detail = errorMessageFromBody(parsed);
+    logDebug(`Error response body: ${raw.slice(0, 300)}`);
+    return new HttpError(
+      res.status,
+      `chat/completions failed: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`,
+      raw
+    );
   }
 
   /**
@@ -1036,9 +1417,18 @@ function toOpenAiMessages(messages) {
 
 /**
  * Parse an SSE byte stream and yield the payload of each `data:` line.
+ *
+ * A server that answers `200` with a plain JSON body instead of an SSE stream
+ * emits no `data:` line at all. That body is the only clue about what went
+ * wrong, so it is captured on the returned generator's `nonSseBody` property
+ * rather than being discarded — otherwise a misconfigured gateway looks like an
+ * empty-but-successful reply.
+ *
+ * @param {AsyncIterable<Uint8Array>} body
  */
 async function* sseData(body) {
   const decoder = new TextDecoder();
+  const nonSse = [];
   let buffer = '';
   for await (const chunk of body) {
     buffer += decoder.decode(chunk, { stream: true });
@@ -1048,6 +1438,10 @@ async function* sseData(body) {
       buffer = buffer.slice(idx + 1);
       if (line.startsWith('data:')) {
         yield line.slice(5).trim();
+      } else if (line && !line.startsWith(':') && !line.startsWith('event:')) {
+        // Some gateways prefix the payload (e.g. "data-json: {...}").
+        const json = line.indexOf('{');
+        nonSse.push(json >= 0 ? line.slice(json) : line);
       }
     }
   }
@@ -1056,8 +1450,14 @@ async function* sseData(body) {
   const tail = buffer.trim();
   if (tail.startsWith('data:')) {
     yield tail.slice(5).trim();
+  } else if (tail && !tail.startsWith(':') && !tail.startsWith('event:')) {
+    const json = tail.indexOf('{');
+    nonSse.push(json >= 0 ? tail.slice(json) : tail);
   }
+  sseData.lastBody = nonSse.join('\n').slice(0, 500);
 }
+/** Raw non-SSE body from the most recent sseData() call (diagnostics only). */
+sseData.lastBody = '';
 
 /**
  * @param {vscode.ExtensionContext} context

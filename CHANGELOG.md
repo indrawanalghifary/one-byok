@@ -6,9 +6,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-27
+
+### Added
+
+- **Fallback models.** `oneByok.fallbackModels` takes an ordered list of backup
+  model ids; when the selected model fails, each is tried in turn and a message
+  names the model that actually answered. Entries accept `modelId @ <endpoint
+  name or host>` when several endpoints expose the same id, and unknown ids are
+  skipped with a warning. Disabled by default.
+- **Automatic retries.** `oneByok.maxRetries` (default `2`) repeats the selected
+  model on transient failures — network/DNS/timeout errors and HTTP
+  `408`/`409`/`425`/`429`/`500`/`502`/`503`/`504` — with exponential backoff and
+  jitter. Wrong credentials (`401`/`403`) and bad requests (`400`/`404`/`422`) are
+  never retried. A `429` also pauses before the fallback model is tried.
+
 ### Fixed
 
-- **Network failures now explain themselves.** A failed request used to surface
+- **Errors reported inside an HTTP 200 response are no longer ignored.** Gateways
+  such as vLLM, LiteLLM and OpenRouter reply `200` and then send
+  `{"error":{"message":"..."}}` — either as an SSE element or as a plain JSON
+  body. Both were silently swallowed, so the request looked like it succeeded
+  with an empty reply and the user saw only "Sorry, no response was returned."
+  These are now treated as failures: they are retried, they trigger fallback, and
+  the server's own message is surfaced (the raw body is quoted when there is no
+  parseable message).
+- **Fallback is refused once output has started.** If text has already reached
+  the chat, retrying would duplicate it and switching models would append a
+  contradictory answer, so the request fails with a clear explanation instead.
+  Tool calls are unaffected because they are only delivered after the stream
+  completes, so an interrupted tool call never runs twice.
+- **HTTP error bodies are summarised, not dumped.** `{ error: { message } }`,
+  `{ error: "..." }`, `{ message }`, `{ detail }` (FastAPI) and plain-text bodies
+  are all parsed, so a failed request reads
+  `chat/completions failed: HTTP 400 — The model \`ghost\` does not exist`
+  instead of a raw 300-character JSON paste.
+- **A `401`/`403` no longer wastes fallback attempts on the same host.** Every
+  model behind rejected credentials would fail identically, so that endpoint's
+  remaining fallbacks are skipped (fallbacks on *other* endpoints are still
+  tried).
+- Network failures now explain themselves. A failed request used to surface
   only as `fetch failed`, which gives no clue what went wrong. The real cause is
   now read from the error chain and included in both the chat error and the
   output channel, with a short hint — e.g. `ECONNRESET: socket hang up` plus
