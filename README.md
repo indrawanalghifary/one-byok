@@ -1,6 +1,6 @@
 # One-BYOK
 
-**One-BYOK** is a VS Code extension that enables GitHub Copilot to use your own
+**One-BYOK** is a VS Code extension that enables VS Code Chat to use your own
 **OpenAI-compatible API provider**.
 
 Bring your own API **Base URL** and **API Key**, and One-BYOK automatically
@@ -18,14 +18,14 @@ automatically. No scripts, no manual syncing.
 - 🤖 **Automatic Model Discovery** — Fetch and detect available models from the configured provider.
 - 👁️ **Automatic Vision Support** — Detect whether a model supports image/vision input and expose the capability accordingly.
 - 🔄 **Provider Agnostic** — Designed to work with APIs that follow the OpenAI-compatible API format.
-- ⚙️ **VS Code Integration** — Designed specifically to integrate with the VS Code Copilot workflow.
+- ⚙️ **VS Code Integration** — Plugs into the VS Code Chat model picker through the `vscode.lm` provider API.
 - 🧩 **Multiple Endpoints** — Register any number of endpoints; models from all of them are aggregated in the picker, each labelled with its endpoint name.
 - 📁 **Optional Workspace Context** — Inject workspace metadata (active files, git branch, project structure) into system prompts so models understand your project.
-- 🛠️ **Tool Calling** — Pass tool calls through to the endpoint, so Copilot agent mode works when the model supports it.
+- 🛠️ **Tool Calling** — Pass tool calls through to the endpoint, so agent mode works when the model supports it.
 
 ## 🎯 Use Case
 
-One-BYOK is useful when you want to use Copilot with:
+One-BYOK is useful when you want to use VS Code Chat with:
 
 - Self-hosted OpenAI-compatible APIs
 - Local LLM servers
@@ -97,6 +97,31 @@ Open **One-BYOK: Manage Endpoints** again at any time to edit, test or remove on
 Open AI Chat → model picker → **One-BYOK** section. All models reported by every
 configured endpoint appear there dynamically. Tool calling is passed through (agent mode
 works) when the endpoint supports it; disable via `oneByok.enableTools`.
+
+### Agent Host ("Open in Agents" / `Ctrl+Shift+A`)
+
+The Agent Host window is a **separate model surface** from the regular Chat view, and it
+only exposes models that have been *explicitly bridged* into it. VS Code ships this
+bridge for BYOK providers behind an experimental setting that is **off by default**:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `chat.agentHost.byokModels.enabled` | `false` | Expose your BYOK (One-BYOK) models in the Agent Host model picker. Tagged `experimental`. |
+
+To use your One-BYOK models inside the Agent Host:
+
+1. Enable `chat.agentHost.byokModels.enabled` in Settings.
+2. Reload the window.
+3. Open the Agent Host (`Ctrl+Shift+A`) and pick your model in its model picker.
+
+Before this setting is enabled, the Agent Host shows a **"Add models"** notification
+rather than an empty picker — that notification is VS Code's prompt to enable the bridge,
+and it is expected behaviour, not a One-BYOK failure.
+
+Note that the Agent Host requires the built-in Copilot chat extension to supply its
+harness. `chat.agentHost.allowSignedOutWhenUsable` controls whether that harness may run
+before you sign in; without it, sign in to a GitHub account (a free account is enough — no
+Copilot subscription is required for BYOK) before the Agent Host can start.
 
 ## Settings
 
@@ -292,6 +317,16 @@ For now, tools are limited to what VS Code provides natively. Stay tuned for MCP
 2. Check the **One-BYOK** output channel — it logs the base URL/key source used for discovery (`setting:oneByok.endpoints`, `secret:...`, or `setting:...`).
 3. Run **One-BYOK: Refresh Model List** after changing the configuration.
 4. If you see duplicate empty entries (e.g. `one-byok 2`), delete them via the gear icon next to the provider in **Manage Models**.
+
+### Models don't appear in the Agent Host (`Ctrl+Shift+A`)
+
+The Agent Host uses a **separate model list** from the regular Chat view, so a model that
+works in Chat can still be missing there.
+
+1. Enable `chat.agentHost.byokModels.enabled` (default `false`, marked `experimental`) and reload the window.
+2. If you see an **"Add models"** notification in the Agent Host, that is VS Code asking you to enable the bridge above — not a One-BYOK error.
+3. Sign in to a GitHub account if the Agent Host itself refuses to start (no Copilot subscription needed for BYOK).
+4. Confirm the model still works in the normal Chat picker first; if it does, the issue is the Agent Host bridge, not your endpoint.
 
 ### Models aren't receiving workspace context
 

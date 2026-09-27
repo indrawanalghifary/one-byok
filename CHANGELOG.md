@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **More accurate product wording.** Documentation no longer says One-BYOK
+  "enables GitHub Copilot". VS Code, not Copilot, owns the model registry
+  (`vscode.lm`) and exposes models to every consumer, so the wording is now
+  "enables VS Code Chat". Copilot is one consumer of that registry, not the
+  thing One-BYOK drives.
+
+### Added
+
+- **Agent Host documentation.** The "Open in Agents" window (`Ctrl+Shift+A`)
+  uses a separate model list from the regular Chat view. Documented how to
+  bridge One-BYOK models into it via `chat.agentHost.byokModels.enabled`
+  (experimental, off by default), plus a troubleshooting entry for the
+  "Add models" notification and the sign-in requirement of the Agent Host.
+
 ## [0.4.0] - 2026-09-27
 
 ### Added

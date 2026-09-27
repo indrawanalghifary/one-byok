@@ -1,7 +1,7 @@
 {
   "name": "one-byok",
   "displayName": "One-BYOK — OpenAI-Compatible Provider",
-  "description": "Bring your own OpenAI-compatible API provider to GitHub Copilot. Configure a Base URL and API Key, and One-BYOK discovers available models automatically and detects vision capabilities per model.",
+  "description": "Bring your own OpenAI-compatible API provider to VS Code Chat. Configure a Base URL and API Key, and One-BYOK discovers available models automatically and detects vision capabilities per model.",
   "version": "0.4.0",
   "publisher": "one-byok",
   "icon": "icon.png",
@@ -57,7 +57,7 @@
         "oneByok.enableTools": {
           "type": "boolean",
           "default": true,
-          "description": "Advertise tool-calling capability (needed for Copilot agent mode) and pass tools through to the endpoint."
+          "description": "Advertise tool-calling capability (needed for agent mode) and pass tools through to the endpoint."
         },
         "oneByok.enableVision": {
           "type": "boolean",
