@@ -1,4 +1,4 @@
-# Pre-commit configuration for vscode-unsloth-byok
+# Pre-commit configuration for one-byok
 # Install: pip install pre-commit && pre-commit install
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

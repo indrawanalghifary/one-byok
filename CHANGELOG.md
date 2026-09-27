@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`debugLogging` is now honoured.** The setting was previously declared but
+  never read, so the extension always wrote verbose traces (request bodies, SSE
+  chunks, tool calls/results, image conversion) to the output channel. Those
+  traces are now gated behind `oneByok.debugLogging`, which defaults to
+  `false` and can be enabled whenever verbose diagnostics are needed. Always-on
+  diagnostics (activation, errors, model discovery, user-triggered commands)
+  are unchanged.
+
+### Changed
+
+- **Rebranded to One-BYOK.** The extension is now published as
+  `one-byok.one-byok` with display name **One-BYOK**; the vendor id changed
+  from `byok-models` to `one-byok` and the output channel from **BYOK Models**
+  to **One-BYOK**.
+- **Settings and commands renamed.** All `byokModels.*` settings are now
+  `oneByok.*` (`oneByok.endpoints`, `oneByok.baseUrl`, `oneByok.apiKey`,
+  `oneByok.enableTools`, `oneByok.enableVision`, `oneByok.forceVision`,
+  `oneByok.injectWorkspaceContext`, `oneByok.maxWorkspaceContextChars`,
+  `oneByok.maxInputTokens`, `oneByok.maxOutputTokens`,
+  `oneByok.requestTimeoutMs`, `oneByok.debugLogging`), and all
+  `byokModels.*` commands are now `oneByok.*`. Entries in this changelog
+  below this section refer to the previous names.
+- **Secret key renamed** from `byokModelsApiKey` to `oneByokApiKey`. A
+  previously stored API key must be set again via **One-BYOK: Set API Key**.
+
 ## [0.2.20] - 2026-08-31
 
 ### Added

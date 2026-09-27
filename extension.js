@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * BYOK Models — zero-touch dynamic language model provider for VS Code AI Chat.
+ * One-BYOK — zero-touch dynamic language model provider for VS Code AI Chat.
  *
  * - Models are discovered live from `<baseUrl>/models` every time VS Code asks
  *   (provideLanguageModelChatInformation), so the picker always matches the server.
  * - Chat requests are streamed from `<baseUrl>/chat/completions` (SSE) and translated
  *   into LanguageModelTextPart / LanguageModelToolCallPart progress reports.
- * - The API key lives in VS Code secret storage (set via the "BYOK Models: Set API Key"
- *   command), with an optional plaintext fallback in `byokModels.apiKey`.
+ * - The API key lives in VS Code secret storage (set via the "One-BYOK: Set API Key"
+ *   command), with an optional plaintext fallback in `oneByok.apiKey`.
  * - Workspace context (active files, git info, project structure) is injected into
  *   system prompts to give models awareness of the user's project context.
  * - Tool results are logged and preserved across multi-turn interactions.
@@ -18,8 +18,8 @@ const vscode = require('vscode');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const VENDOR = 'byok-models';
-const SECRET_KEY = 'byokModelsApiKey';
+const VENDOR = 'one-byok';
+const SECRET_KEY = 'oneByokApiKey';
 // Key name VS Code uses when storing credentials entered through the native
 // "Add model" (Manage Models) UI — mirrors the opencodego pattern (<vendor>.<property>).
 const MANAGED_SECRET_KEY = `${VENDOR}.apiKey`;
@@ -27,15 +27,48 @@ const MANAGED_SECRET_KEY = `${VENDOR}.apiKey`;
 /** @type {vscode.OutputChannel | undefined} */
 let channel;
 
-function log(message) {
+/**
+ * Mirrors `oneByok.debugLogging`. Cached because `logDebug` runs inside the
+ * per-chunk SSE loop and must not hit the configuration service every time.
+ */
+let debugEnabled = false;
+
+function ensureChannel() {
   if (!channel) {
-    channel = vscode.window.createOutputChannel('BYOK Models');
+    channel = vscode.window.createOutputChannel('One-BYOK');
   }
-  channel.appendLine(`[${new Date().toISOString()}] ${message}`);
+  return channel;
+}
+
+/** Always-on diagnostics: activation, errors, and user-triggered actions. */
+function log(message) {
+  ensureChannel().appendLine(`[${new Date().toISOString()}] ${message}`);
+}
+
+/**
+ * Verbose diagnostics: request bodies, SSE chunks, image conversion details and
+ * tool-call parsing. Gated behind `oneByok.debugLogging` (default `false`) so a
+ * normal run stays quiet and prompt/response content is not written to the
+ * output channel unless the user explicitly opts in.
+ */
+function logDebug(message) {
+  if (!debugEnabled) {
+    return;
+  }
+  ensureChannel().appendLine(`[${new Date().toISOString()}] [debug] ${message}`);
+}
+
+/** Refresh the cached debug flag from settings (called on activate + config change). */
+function refreshDebugFlag() {
+  try {
+    debugEnabled = settings().get('debugLogging', false) === true;
+  } catch {
+    debugEnabled = false;
+  }
 }
 
 // No built-in endpoint: users configure their own OpenAI-compatible server
-// via `byokModels.baseUrl` or the Add-model UI (`byok-models.baseUrl` secret).
+// via `oneByok.baseUrl` or the Add-model UI (`one-byok.baseUrl` secret).
 const DEFAULT_BASE_URL = '';
 
 // Cache TTL for model discovery results (30 seconds). Avoids redundant
@@ -64,13 +97,13 @@ async function resolveBaseUrl(context) {
   }
   const configured = String(settings().get('baseUrl', '') || '').trim();
   if (configured) {
-    return { url: configured.endsWith('/') ? configured.slice(0, -1) : configured, source: 'setting:byokModels.baseUrl' };
+    return { url: configured.endsWith('/') ? configured.slice(0, -1) : configured, source: 'setting:oneByok.baseUrl' };
   }
   return { url: DEFAULT_BASE_URL, source: 'default' };
 }
 
 /**
- * All configured endpoints. Only the `byokModels.endpoints` setting is used —
+ * All configured endpoints. Only the `oneByok.endpoints` setting is used —
  * the native Add-model UI store (options.configuration) is deliberately NOT read:
  * VS Code hands us whatever the user typed there forever (including junk or a
  * cancelled half-edit), and there is no stable API to clear it, so a stale native
@@ -89,7 +122,7 @@ function resolveEndpoints() {
         baseUrl: url,
         apiKey: String(e?.apiKey ?? '').trim(),
         name: endpointName(e?.name, url),
-        source: 'setting:byokModels.endpoints',
+        source: 'setting:oneByok.endpoints',
       });
     }
   }
@@ -106,7 +139,7 @@ function endpointName(name, baseUrl) {
 }
 
 function settings() {
-  return vscode.workspace.getConfiguration('byokModels');
+  return vscode.workspace.getConfiguration('oneByok');
 }
 
 /**
@@ -257,7 +290,7 @@ async function getActiveFileContext(lines = 10) {
 }
 
 
-class BYOKModelsProvider {
+class OneByokProvider {
   /**
    * @param {vscode.ExtensionContext} context
    */
@@ -326,7 +359,7 @@ class BYOKModelsProvider {
    * @returns {Promise<vscode.LanguageModelChatInformation[]>}
    */
   async provideLanguageModelChatInformation(options, token) {
-    // Endpoints come only from the `byokModels.endpoints` setting.
+    // Endpoints come only from the `oneByok.endpoints` setting.
     // Legacy single-endpoint secret/storage is deliberately ignored.
     const endpoints = resolveEndpoints();
     /** @type {vscode.LanguageModelChatInformation[]} */
@@ -337,7 +370,7 @@ class BYOKModelsProvider {
       log(
         `Add model clicked (${endpoints.length} endpoint(s) configured). Opening Add Endpoint form.`
       );
-      void vscode.commands.executeCommand('byokModels.addEndpoint');
+      void vscode.commands.executeCommand('oneByok.addEndpoint');
       // Return current models immediately; the form runs async and will fire
       // fireChanged() to refresh the picker after the user adds one.
       if (endpoints.length > 0) {
@@ -444,7 +477,7 @@ class BYOKModelsProvider {
       }
       // Re-throw so VS Code surfaces the error in the chat UI instead of
       // the generic "Sorry, no response was returned."
-      throw new Error(`BYOK Models: ${friendly}`);
+      throw new Error(`One-BYOK: ${friendly}`);
     }
   }
 
@@ -461,7 +494,7 @@ class BYOKModelsProvider {
       apiKey = await this.resolveApiKey();
     }
     if (!base) {
-      throw new Error('BYOK Models is not configured (missing base URL).');
+      throw new Error('One-BYOK is not configured (missing base URL).');
     }
 
     // Gather and optionally inject workspace context.
@@ -480,14 +513,14 @@ class BYOKModelsProvider {
       try {
         const wsCtx = await gatherWorkspaceContext();
         workspaceContextStr = buildWorkspaceContextPrompt(wsCtx);
-        log(`Workspace context collected: ${wsCtx.workspaceFolders.length} folders, ${wsCtx.openFiles.length} open files`);
-        log(`Model context window: ${modelContextWindow.toLocaleString()} tokens, workspace context budget: ${maxContextChars} chars`);
+        logDebug(`Workspace context collected: ${wsCtx.workspaceFolders.length} folders, ${wsCtx.openFiles.length} open files`);
+        logDebug(`Model context window: ${modelContextWindow.toLocaleString()} tokens, workspace context budget: ${maxContextChars} chars`);
         if (workspaceContextStr.length > maxContextChars) {
           workspaceContextStr = workspaceContextStr.slice(0, maxContextChars) + '\n…(truncated)';
-          log(`Workspace context truncated to ${maxContextChars} chars (${Math.floor(maxContextChars/4).toLocaleString()} tokens)`);
+          logDebug(`Workspace context truncated to ${maxContextChars} chars (${Math.floor(maxContextChars/4).toLocaleString()} tokens)`);
         }
       } catch (ctxErr) {
-        log(`Workspace context gathering failed (continuing without): ${ctxErr?.message ?? ctxErr}`);
+        logDebug(`Workspace context gathering failed (continuing without): ${ctxErr?.message ?? ctxErr}`);
       }
     }
 
@@ -539,21 +572,21 @@ class BYOKModelsProvider {
       if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
         body.tool_choice = 'required';
       }
-      log(`Tools available: ${options.tools.map((t) => t.name).join(', ')}`);
+      logDebug(`Tools available: ${options.tools.map((t) => t.name).join(', ')}`);
     } else if (hasImageContent) {
-      log('Tools omitted: request contains image content (some endpoints reject tools + image_url)');
+      logDebug('Tools omitted: request contains image content (some endpoints reject tools + image_url)');
     }
 
     const requestTimeoutMs = settings().get('requestTimeoutMs', 300_000);
-    log(`Request timeout: ${requestTimeoutMs}ms`);
-    log(`Request body: ${JSON.stringify(body).slice(0, 500)}`);
+    logDebug(`Request timeout: ${requestTimeoutMs}ms`);
+    logDebug(`Request body: ${JSON.stringify(body).slice(0, 500)}`);
     const res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: this.headers(apiKey, true),
       body: JSON.stringify(body),
       signal: this.signal(token, requestTimeoutMs),
     });
-    log(`HTTP response: ${res.status} ${res.statusText}`);
+    logDebug(`HTTP response: ${res.status} ${res.statusText}`);
     if (!res.ok) {
       const detail = (await res.text()).slice(0, 300);
       throw new Error(`chat/completions failed: HTTP ${res.status} ${detail}`);
@@ -563,8 +596,8 @@ class BYOKModelsProvider {
     const toolAcc = new Map();
     let textContent = '';
     for await (const data of sseData(res.body)) {
-      // DEBUG: Log raw SSE data to understand what the model returns
-      log(`SSE data: ${data.length > 200 ? data.slice(0, 200) + '...' : data}`);
+      // Verbose: raw SSE payloads are large and contain prompt/response content.
+      logDebug(`SSE data: ${data.length > 200 ? data.slice(0, 200) + '...' : data}`);
       if (data === '[DONE]') {
         break;
       }
@@ -599,7 +632,7 @@ class BYOKModelsProvider {
     if (toolAcc.size > 0) {
       for (const [idx, acc] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
         if (acc.name) {
-          log(`Tool call ${idx}: ${acc.name}(${acc.args.length > 100 ? acc.args.slice(0, 100) + '...' : acc.args})`);
+          logDebug(`Tool call ${idx}: ${acc.name}(${acc.args.length > 100 ? acc.args.slice(0, 100) + '...' : acc.args})`);
           // Parse arguments into an object — LanguageModelToolCallPart requires
           // an object, not a JSON string.  VS Code rejects strings with
           // "must be object".
@@ -609,10 +642,10 @@ class BYOKModelsProvider {
             if (typeof parsed === 'string') {
               // Model emitted a bare string (e.g. "/path/to/file") instead of
               // an object. Wrap it so VS Code accepts the tool call.
-              log(`Tool call ${idx}: args was a bare string, wrapping as object`);
+              logDebug(`Tool call ${idx}: args was a bare string, wrapping as object`);
               argsObj = { path: parsed };
             } else if (typeof parsed !== 'object' || parsed === null) {
-              log(`Tool call ${idx}: args was a non-object primitive, wrapping`);
+              logDebug(`Tool call ${idx}: args was a non-object primitive, wrapping`);
               argsObj = { value: parsed };
             } else {
               argsObj = parsed;
@@ -620,7 +653,7 @@ class BYOKModelsProvider {
           } catch {
             // Unparseable JSON — emit a descriptive tool result so the model
             // knows what went wrong instead of VS Code silently rejecting it.
-            log(`Tool call ${idx}: unparseable args, emitting error result`);
+            logDebug(`Tool call ${idx}: unparseable args, emitting error result`);
             const callId = acc.id || randomId();
             progress.report(
               new vscode.LanguageModelToolCallPart(callId, acc.name, {}),
@@ -640,7 +673,7 @@ class BYOKModelsProvider {
 
     // Log text response summary
     if (textContent) {
-      log(`Response: ${textContent.length} characters`);
+      logDebug(`Response: ${textContent.length} characters`);
     }
   }
 
@@ -768,7 +801,7 @@ function toOpenAiImageContent(part) {
   const bytes = toUint8Array(part.data) ?? toUint8Array(part.value?.data);
   if (bytes && bytes.byteLength > 0) {
     const base64 = Buffer.from(bytes).toString('base64');
-    log(`Image part: mimeType=${mimeType}, bytes=${bytes.byteLength}, base64=${base64.length}`);
+    logDebug(`Image part: mimeType=${mimeType}, bytes=${bytes.byteLength}, base64=${base64.length}`);
     return {
       type: 'image_url',
       image_url: {
@@ -778,7 +811,7 @@ function toOpenAiImageContent(part) {
   }
   const url = part.url || part.value?.url || part.image_url?.url;
   if (typeof url === 'string') {
-    log(`Image part: using URL ${url.slice(0, 60)}…`);
+    logDebug(`Image part: using URL ${url.slice(0, 60)}…`);
     return {
       type: 'image_url',
       image_url: {
@@ -786,7 +819,7 @@ function toOpenAiImageContent(part) {
       },
     };
   }
-  log(`Image part skipped: no decodable bytes or url (keys: ${Object.keys(part).join(',')})`);
+  logDebug(`Image part skipped: no decodable bytes or url (keys: ${Object.keys(part).join(',')})`);
   return null;
 }
 
@@ -827,7 +860,7 @@ function toOpenAiMessages(messages) {
         // Surface unrecognised binary/mime parts once so image payloads VS Code
         // sends under a different shape are visible in the output channel.
         if (part && typeof part === 'object' && ('mimeType' in part || 'data' in part)) {
-          log(`Unrecognised binary part (keys: ${Object.keys(part).join(',')}, mimeType: ${part.mimeType ?? 'n/a'}, ctor: ${part.constructor?.name ?? 'n/a'})`);
+          logDebug(`Unrecognised binary part (keys: ${Object.keys(part).join(',')}, mimeType: ${part.mimeType ?? 'n/a'}, ctor: ${part.constructor?.name ?? 'n/a'})`);
         }
         texts.push(String(partValue(part) ?? JSON.stringify(part ?? '')));
       }
@@ -869,7 +902,7 @@ function toOpenAiMessages(messages) {
         // Log tool results for transparency in multi-turn flows
         const resultPreview = content.length > 150 ? content.slice(0, 150) + '...' : content;
         const singleLine = resultPreview.replaceAll('\n', ' ');
-        log(`Tool result: ${tr.callId} → ${singleLine}`);
+        logDebug(`Tool result: ${tr.callId} → ${singleLine}`);
         out.push({ role: 'tool', tool_call_id: tr.callId, content });
       }
       if (texts.length || imageParts.length) {
@@ -933,10 +966,11 @@ async function* sseData(body) {
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
-  channel = vscode.window.createOutputChannel('BYOK Models');
+  channel = vscode.window.createOutputChannel('One-BYOK');
   context.subscriptions.push(channel);
+  refreshDebugFlag();
 
-  const provider = new BYOKModelsProvider(context);
+  const provider = new OneByokProvider(context);
   context.subscriptions.push(provider);
 
   // Register the language-model provider (requires VS Code ≥ 1.102).
@@ -948,7 +982,7 @@ function activate(context) {
   }
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('byokModels.setApiKey', async () => {
+    vscode.commands.registerCommand('oneByok.setApiKey', async () => {
       const key = await vscode.window.showInputBox({
         prompt: `API key for the "${VENDOR}" model provider`,
         password: true,
@@ -960,7 +994,7 @@ function activate(context) {
       const trimmed = key.trim();
       if (!trimmed) {
         log('Set API Key cancelled: input was empty; nothing stored.');
-        void vscode.window.showWarningMessage('BYOK Models: empty key — nothing stored.');
+        void vscode.window.showWarningMessage('One-BYOK: empty key — nothing stored.');
         return;
       }
       await context.secrets.store(MANAGED_SECRET_KEY, trimmed);
@@ -968,12 +1002,12 @@ function activate(context) {
       const readStatus = readBack?.length ? `ok len=${readBack.length}` : 'FAILED';
       log(`API key stored (read-back: ${readStatus}).`);
       provider.fireChanged();
-      void vscode.window.showInformationMessage('BYOK Models: API key stored. Model list will refresh automatically.');
+      void vscode.window.showInformationMessage('One-BYOK: API key stored. Model list will refresh automatically.');
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('byokModels.addEndpoint', async () => {
+    vscode.commands.registerCommand('oneByok.addEndpoint', async () => {
       const name = await vscode.window.showInputBox({
         prompt: 'Name for this endpoint (e.g. "My Ollama")',
         ignoreFocusOut: true,
@@ -991,7 +1025,7 @@ function activate(context) {
       }
       const url = trimUrl(baseUrl);
       if (!url) {
-        void vscode.window.showWarningMessage('BYOK Models: empty base URL — nothing added.');
+        void vscode.window.showWarningMessage('One-BYOK: empty base URL — nothing added.');
         return;
       }
       const apiKey = await vscode.window.showInputBox({
@@ -1004,7 +1038,7 @@ function activate(context) {
       }
       const endpoints = Array.isArray(settings().get('endpoints', [])) ? settings().get('endpoints', []) : [];
       if (endpoints.some((e) => trimUrl(e?.baseUrl) === url)) {
-        void vscode.window.showWarningMessage('BYOK Models: that endpoint is already configured.');
+        void vscode.window.showWarningMessage('One-BYOK: that endpoint is already configured.');
         return;
       }
       const entry = { baseUrl: url, apiKey: apiKey.trim() };
@@ -1016,16 +1050,16 @@ function activate(context) {
         await settings().update('endpoints', [...endpoints, entry], vscode.ConfigurationTarget.Global);
       } catch (err) {
         // ponytail: surface a silent write failure instead of losing the endpoint
-        void vscode.window.showErrorMessage(`BYOK Models: failed to save endpoint (${String(err?.message ?? err)}).`);
+        void vscode.window.showErrorMessage(`One-BYOK: failed to save endpoint (${String(err?.message ?? err)}).`);
         return;
       }
       provider.fireChanged();
-      void vscode.window.showInformationMessage('BYOK Models: endpoint added. Model list will refresh automatically.');
+      void vscode.window.showInformationMessage('One-BYOK: endpoint added. Model list will refresh automatically.');
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('byokModels.removeEndpoint', async () => {
+    vscode.commands.registerCommand('oneByok.removeEndpoint', async () => {
       const endpoints = Array.isArray(settings().get('endpoints', [])) ? settings().get('endpoints', []) : [];
       const picks = await vscode.window.showQuickPick(
         endpoints.map((e, i) => ({ label: endpointName(e?.name, e?.baseUrl), description: e?.apiKey ? 'key set' : 'no key', index: i })),
@@ -1036,12 +1070,12 @@ function activate(context) {
       }
       await settings().update('endpoints', endpoints.filter((_, i) => i !== picks.index), vscode.ConfigurationTarget.Global);
       provider.fireChanged();
-      void vscode.window.showInformationMessage('BYOK Models: endpoint removed. Model list will refresh automatically.');
+      void vscode.window.showInformationMessage('One-BYOK: endpoint removed. Model list will refresh automatically.');
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('byokModels.clearApiKey', async () => {
+    vscode.commands.registerCommand('oneByok.clearApiKey', async () => {
       await context.secrets.delete(MANAGED_SECRET_KEY);
       await context.secrets.delete(SECRET_KEY);
       provider.fireChanged();
@@ -1050,27 +1084,28 @@ function activate(context) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('byokModels.refreshModels', () => {
+    vscode.commands.registerCommand('oneByok.refreshModels', () => {
       provider.fireChanged();
       log('Manual refresh requested.');
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('byokModels.showWorkspaceContext', async () => {
+    vscode.commands.registerCommand('oneByok.showWorkspaceContext', async () => {
       const wsCtx = await gatherWorkspaceContext();
       const contextStr = buildWorkspaceContextPrompt(wsCtx);
       log('=== Workspace Context Snapshot ===');
       log(contextStr);
       await vscode.window.showInformationMessage(
-        `Workspace context gathered: ${wsCtx.openFiles.length} open files, ${wsCtx.workspaceFolders.length} folders. Check BYOK Models output channel for details.`
+        `Workspace context gathered: ${wsCtx.openFiles.length} open files, ${wsCtx.workspaceFolders.length} folders. Check One-BYOK output channel for details.`
       );
     })
   );
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('byokModels')) {
+      if (e.affectsConfiguration('oneByok')) {
+        refreshDebugFlag();
         provider.fireChanged();
       }
     })
@@ -1086,7 +1121,7 @@ function activate(context) {
     })
   );
 
-  log('BYOK Models provider activated.');
+  log('One-BYOK provider activated.');
 }
 
 function deactivate() {

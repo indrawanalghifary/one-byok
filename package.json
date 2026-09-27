@@ -1,13 +1,13 @@
 {
-  "name": "byok-models",
-  "displayName": "BYOK Models — OpenAI-Compatible Provider",
-  "description": "Zero-touch dynamic language model provider for local inference. Works with any OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, and more. Models are discovered live from /v1/models.",
+  "name": "one-byok",
+  "displayName": "One-BYOK — OpenAI-Compatible Provider",
+  "description": "Bring your own OpenAI-compatible API provider to GitHub Copilot. Configure a Base URL and API Key, and One-BYOK discovers available models automatically and detects vision capabilities per model.",
   "version": "0.2.20",
-  "publisher": "cristall",
+  "publisher": "one-byok",
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Esysc/vscode-unsloth-byok.git"
+    "url": "https://github.com/indrawanalghifary/one-byok.git"
   },
   "keywords": [
     "byok",
@@ -27,81 +27,81 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onLanguageModelChatProvider:byok-models"
+    "onLanguageModelChatProvider:one-byok"
   ],
   "main": "./extension.js",
   "contributes": {
     "configuration": {
-      "title": "BYOK Models",
+      "title": "One-BYOK",
       "properties": {
-        "byokModels.baseUrl": {
+        "oneByok.baseUrl": {
           "type": "string",
           "default": "",
           "description": "Base URL of the OpenAI-compatible API (should end with /v1). Models are fetched from <baseUrl>/models."
         },
-        "byokModels.apiKey": {
+        "oneByok.apiKey": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Plaintext fallback for the API key. Prefer the command **BYOK Models: Set API Key**, which stores the key in VS Code secret storage."
+          "markdownDescription": "Plaintext fallback for the API key. Prefer the command **One-BYOK: Set API Key**, which stores the key in VS Code secret storage."
         },
-        "byokModels.maxInputTokens": {
+        "oneByok.maxInputTokens": {
           "type": "number",
           "default": 262144,
           "description": "Reported max input tokens for discovered models."
         },
-        "byokModels.maxOutputTokens": {
+        "oneByok.maxOutputTokens": {
           "type": "number",
           "default": 32768,
           "description": "Reported max output tokens for discovered models."
         },
-        "byokModels.enableTools": {
+        "oneByok.enableTools": {
           "type": "boolean",
           "default": true,
           "description": "Advertise tool-calling capability (needed for Copilot agent mode) and pass tools through to the endpoint."
         },
-        "byokModels.enableVision": {
+        "oneByok.enableVision": {
           "type": "boolean",
           "default": true,
           "description": "Advertise vision / image input capability for models that support it and pass image attachments through to the endpoint."
         },
-        "byokModels.forceVision": {
+        "oneByok.forceVision": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Advertise image input for **every** model, even those the endpoint reports as non-vision. Only enable this when your endpoint/proxy automatically routes image requests to a vision-capable upstream model (e.g. a gateway that silently falls back). With a strict endpoint this will surface HTTP 400 errors when an image is attached to a non-vision model."
         },
-        "byokModels.injectWorkspaceContext": {
+        "oneByok.injectWorkspaceContext": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Automatically inject workspace context (active files, git info, open tabs) into system prompts. Enables models to understand your project structure and provide more relevant responses. Disabled by default for local models with smaller context windows."
         },
-        "byokModels.debugLogging": {
+        "oneByok.debugLogging": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Enable verbose logging of tool calls, results, and workspace context. Check the **BYOK Models** output channel for details."
+          "markdownDescription": "Write verbose traces (request bodies, SSE chunks, tool calls and results, image conversion) to the **One-BYOK** output channel. Disabled by default: traces may contain prompt and response content."
         },
-        "byokModels.maxWorkspaceContextChars": {
+        "oneByok.maxWorkspaceContextChars": {
           "type": "number",
           "default": 500,
           "markdownDescription": "Maximum characters for workspace context injected into prompts. Lower this for small local models (8B and below) to avoid overwhelming them."
         },
-        "byokModels.requestTimeoutMs": {
+        "oneByok.requestTimeoutMs": {
           "type": "number",
           "default": 300000,
           "markdownDescription": "Request timeout in milliseconds for chat completions. If the model does not respond within this time, the request is cancelled. Default: 300000 (5 minutes)."
         },
-        "byokModels.endpoints": {
+        "oneByok.endpoints": {
           "type": "array",
           "default": [],
           "scope": "application",
-          "markdownDescription": "OpenAI-compatible endpoints (each `{ baseUrl, apiKey, name? }`). Use the command **BYOK Models: Add Endpoint** to add endpoints; they are stored here and persist across workspaces. An optional `name` labels the endpoint in the model picker (falls back to the URL host)."
+          "markdownDescription": "OpenAI-compatible endpoints (each `{ baseUrl, apiKey, name? }`). Use the command **One-BYOK: Add Endpoint** to add endpoints; they are stored here and persist across workspaces. An optional `name` labels the endpoint in the model picker (falls back to the URL host)."
         }
       }
     },
     "languageModelChatProviders": [
       {
-        "vendor": "byok-models",
-        "displayName": "BYOK Models",
-        "managementCommand": "byokModels.addEndpoint",
+        "vendor": "one-byok",
+        "displayName": "One-BYOK",
+        "managementCommand": "oneByok.addEndpoint",
         "configuration": {
           "type": "object",
           "required": ["apiKey", "baseUrl"],
@@ -130,37 +130,37 @@
     ],
     "commands": [
       {
-        "command": "byokModels.setApiKey",
-        "title": "BYOK Models: Set API Key",
-        "category": "BYOK Models"
+        "command": "oneByok.setApiKey",
+        "title": "One-BYOK: Set API Key",
+        "category": "One-BYOK"
       },
       {
-        "command": "byokModels.clearApiKey",
-        "title": "BYOK Models: Clear API Key",
-        "category": "BYOK Models"
+        "command": "oneByok.clearApiKey",
+        "title": "One-BYOK: Clear API Key",
+        "category": "One-BYOK"
       },
       {
-        "command": "byokModels.refreshModels",
-        "title": "BYOK Models: Refresh Model List",
-        "category": "BYOK Models"
+        "command": "oneByok.refreshModels",
+        "title": "One-BYOK: Refresh Model List",
+        "category": "One-BYOK"
       },
       {
-        "command": "byokModels.showWorkspaceContext",
-        "title": "BYOK Models: Show Workspace Context",
-        "category": "BYOK Models",
+        "command": "oneByok.showWorkspaceContext",
+        "title": "One-BYOK: Show Workspace Context",
+        "category": "One-BYOK",
         "description": "Display the workspace context that will be injected into model prompts."
       },
       {
-        "command": "byokModels.addEndpoint",
-        "title": "BYOK Models: Add Endpoint",
-        "category": "BYOK Models",
+        "command": "oneByok.addEndpoint",
+        "title": "One-BYOK: Add Endpoint",
+        "category": "One-BYOK",
         "description": "Add another OpenAI-compatible endpoint (base URL + API key)."
       },
       {
-        "command": "byokModels.removeEndpoint",
-        "title": "BYOK Models: Remove Endpoint",
-        "category": "BYOK Models",
-        "description": "Remove an existing endpoint configured via byokModels.endpoints."
+        "command": "oneByok.removeEndpoint",
+        "title": "One-BYOK: Remove Endpoint",
+        "category": "One-BYOK",
+        "description": "Remove an existing endpoint configured via oneByok.endpoints."
       }
     ]
   }
