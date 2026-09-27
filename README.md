@@ -65,6 +65,11 @@ Then in VS Code: Extensions view → `⋯` → **Install from VSIX…** → pick
 
 ## Configure
 
+> **One-BYOK: Open Settings** (or Settings → search `oneByok`) gives a form-based UI for
+every option — no hand-editing JSON required.
+
+![One-BYOK settings page in VS Code](UI-Settings.png)
+
 ### Option 1: Native "Add model" (first endpoint)
 
 1. Open AI Chat → **Manage Models** → **Add model** → **One-BYOK**
@@ -98,6 +103,8 @@ Open AI Chat → model picker → **One-BYOK** section. All models reported by e
 configured endpoint appear there dynamically. Tool calling is passed through (agent mode
 works) when the endpoint supports it; disable via `oneByok.enableTools`.
 
+![Models discovered from multiple endpoints in the chat model picker](List-Model.png)
+
 ### Agent Host ("Open in Agents" / `Ctrl+Shift+A`)
 
 The Agent Host window is a **separate model surface** from the regular Chat view, and it
@@ -113,6 +120,8 @@ To use your One-BYOK models inside the Agent Host:
 1. Enable `chat.agentHost.byokModels.enabled` in Settings.
 2. Reload the window.
 3. Open the Agent Host (`Ctrl+Shift+A`) and pick your model in its model picker.
+
+![One-BYOK models available in the Agent Host model picker](agents-mode.png)
 
 Before this setting is enabled, the Agent Host shows a **"Add models"** notification
 rather than an empty picker — that notification is VS Code's prompt to enable the bridge,
@@ -296,6 +305,8 @@ the level to **Debug** — because traces include prompt and response content, l
 unless you are actively debugging. You can also pick a level manually from the Output panel
 dropdown; that choice is kept across window reloads unless you change `oneByok.debugLogging`
 again.
+
+![One-BYOK output channel with log level filtering](log.png)
 
 The channel is in-memory only: nothing is written to disk, and no server or MCP endpoint is
 exposed. To share a log, copy it from the Output panel.

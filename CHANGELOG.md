@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (experimental, off by default), plus a troubleshooting entry for the
   "Add models" notification and the sign-in requirement of the Agent Host.
 
+## [0.4.1] - 2026-09-27
+
+### Changed
+
+- **Marketplace listing title.** The extension is now listed as
+  **VSCode Chat BYOK Copilot Custom OpenAI Compatible**, so it is discoverable
+  under the terms people actually search for (VSCode Chat, BYOK, Copilot,
+  custom OpenAI-compatible). The extension identity itself is unchanged:
+  the ID is still `one-byok.one-byok`, so existing installs keep their
+  settings, stored API keys and configured endpoints. Only the title shown in
+  the Marketplace and in the Extensions view changes.
+- **30 keywords** (the Marketplace maximum) instead of 5, covering the
+  provider's real integrations and capabilities: `ollama`, `lm-studio`,
+  `llamacpp`, `vllm`, `litellm`, `openrouter`, `self-hosted`, `local-llm`,
+  `agent-mode`, `tool-calling`, `vision`, and more.
+- The description now names both consumers of the VS Code model registry:
+  VS Code Chat and Copilot Chat.
+
 ## [0.4.0] - 2026-09-27
 
 ### Added

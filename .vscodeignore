@@ -10,6 +10,14 @@ node_modules/**
 *.vsix
 **/*.map
 
+# README screenshots — served from GitHub (vsce rewrites relative README image
+# paths to https://github.com/<owner>/<repo>/raw/<branch>), so shipping them in
+# the package would only bloat the VSIX. icon.png intentionally kept.
+List-Model.png
+UI-Settings.png
+log.png
+agents-mode.png
+
 # Repo-only docs & config
 .pre-commit-config.yaml
 RELEASE_NOTES.md
