@@ -2,7 +2,7 @@
   "name": "one-byok",
   "displayName": "One-BYOK — OpenAI-Compatible Provider",
   "description": "Bring your own OpenAI-compatible API provider to GitHub Copilot. Configure a Base URL and API Key, and One-BYOK discovers available models automatically and detects vision capabilities per model.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "one-byok",
   "icon": "icon.png",
   "repository": {
@@ -116,7 +116,7 @@
       {
         "vendor": "one-byok",
         "displayName": "One-BYOK",
-        "managementCommand": "oneByok.addEndpoint",
+        "managementCommand": "oneByok.manageEndpoints",
         "configuration": {
           "type": "object",
           "required": ["apiKey", "baseUrl"],
@@ -169,13 +169,29 @@
         "command": "oneByok.addEndpoint",
         "title": "One-BYOK: Add Endpoint",
         "category": "One-BYOK",
-        "description": "Add another OpenAI-compatible endpoint (base URL + API key)."
+        "description": "Add another OpenAI-compatible endpoint. Opens the endpoint manager.",
+        "enablement": "false"
       },
       {
         "command": "oneByok.removeEndpoint",
         "title": "One-BYOK: Remove Endpoint",
         "category": "One-BYOK",
-        "description": "Remove an existing endpoint configured via oneByok.endpoints."
+        "description": "Remove an existing endpoint. Opens the endpoint manager.",
+        "enablement": "false"
+      },
+      {
+        "command": "oneByok.openSettings",
+        "title": "One-BYOK: Open Settings",
+        "category": "One-BYOK",
+        "description": "Open the Settings page filtered to every One-BYOK option (all oneByok.* settings).",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "oneByok.manageEndpoints",
+        "title": "One-BYOK: Manage Endpoints",
+        "category": "One-BYOK",
+        "description": "Add, edit, test the connection to, or remove OpenAI-compatible endpoints. API keys are shown only as 'set'/'not set' — the value is never displayed.",
+        "icon": "$(server)"
       }
     ]
   }

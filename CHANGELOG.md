@@ -6,6 +6,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-27
+
+### Added
+
+- **Endpoint manager.** **One-BYOK: Manage Endpoints** replaces the separate
+  add/remove commands with one picker: add, edit, test the connection to, or
+  remove an endpoint, then continue working without re-running a command per
+  change. The base URL is validated (scheme and duplicates), editing keeps the
+  stored API key when the key field is left empty, and the API key is never
+  pre-filled or displayed. Tested endpoints are marked in the list, so "which of
+  my endpoints work?" is answerable at a glance.
+- **One-BYOK: Open Settings** opens the Settings page filtered to `oneByok.*`,
+  giving all 14 settings a form-based UI instead of hand-editing JSON.
+
+### Changed
+
+- The model list is refreshed by running a real `/models` discovery after an
+  endpoint is added, edited or removed, instead of only invalidating the cache.
+  Failures during that refresh are logged rather than swallowed silently.
+- `oneByok.addEndpoint` and `oneByok.removeEndpoint` now open the endpoint
+  manager, so exactly one code path writes `oneByok.endpoints`. The provider's
+  `managementCommand` (the "Manage" link beside the vendor in the model picker)
+  now points at the manager.
+
 ## [0.3.0] - 2026-09-27
 
 ### Added

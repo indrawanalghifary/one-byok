@@ -371,6 +371,228 @@ function endpointName(name, baseUrl) {
   return baseUrl.replace(/^https?:\/\//, '');
 }
 
+/** Raw `oneByok.endpoints` array, always an array even if the setting is malformed. */
+function readEndpoints() {
+  const value = settings().get('endpoints', []);
+  return Array.isArray(value) ? value : [];
+}
+
+/** Persist the endpoint list globally; returns the error message on failure. */
+async function writeEndpoints(list) {
+  try {
+    await settings().update('endpoints', list, vscode.ConfigurationTarget.Global);
+    return undefined;
+  } catch (err) {
+    // A silent write failure would lose the endpoint without explanation.
+    return String(err?.message ?? err);
+  }
+}
+
+/** True when two endpoint URLs point at the same place (ignoring a trailing slash). */
+function sameEndpoint(a, b) {
+  return trimUrl(a) === trimUrl(b);
+}
+
+/**
+ * Collect the three fields of an endpoint. Returns undefined when the user
+ * cancels at any step.
+ *
+ * @param {{ name?: string, baseUrl?: string, apiKey?: string }} [existing]
+ * @param {(url: string) => boolean} [isDuplicate] - Return true to reject the URL.
+ */
+async function promptEndpoint(existing = {}, isDuplicate) {
+  const name = await vscode.window.showInputBox({
+    prompt: 'Name for this endpoint (optional, e.g. "My Ollama")',
+    value: String(existing.name ?? ''),
+    ignoreFocusOut: true,
+  });
+  if (name === undefined) {
+    return undefined;
+  }
+  const baseUrl = await vscode.window.showInputBox({
+    prompt: 'Base URL of the OpenAI-compatible endpoint (e.g. http://localhost:11434/v1)',
+    value: String(existing.baseUrl ?? ''),
+    ignoreFocusOut: true,
+    validateInput: (raw) => {
+      const value = trimUrl(raw);
+      if (!value) {
+        return 'A base URL is required.';
+      }
+      if (!/^https?:\/\//i.test(value)) {
+        return 'The URL must start with http:// or https://';
+      }
+      if (isDuplicate && isDuplicate(value)) {
+        return 'That endpoint is already configured.';
+      }
+      return undefined;
+    },
+  });
+  if (baseUrl === undefined) {
+    return undefined;
+  }
+  // An existing key is deliberately not pre-filled: InputBox would render it in
+  // plain sight. Leaving the field empty keeps the stored key unchanged.
+  const apiKey = await vscode.window.showInputBox({
+    prompt: existing.apiKey
+      ? 'API key — leave empty to keep the current key'
+      : 'API key (leave empty for local endpoints that need none)',
+    password: true,
+    ignoreFocusOut: true,
+  });
+  if (apiKey === undefined) {
+    return undefined;
+  }
+  const label = name.trim();
+  const key = apiKey.trim() || String(existing.apiKey ?? '');
+  const entry = { baseUrl: trimUrl(baseUrl), apiKey: key };
+  if (label) {
+    // Optional label; unnamed endpoints fall back to the host.
+    entry.name = label;
+  }
+  return entry;
+}
+
+/**
+ * Verify an endpoint and report the outcome. Records a checkmark on the list
+ * entry so "which of my endpoints work?" is answerable without leaving the UI.
+ *
+ * @returns {Promise<boolean>} whether the check succeeded.
+ */
+async function runEndpointTest(provider, index, list) {
+  const target = list[index];
+  const label = endpointName(target?.name, target?.baseUrl);
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `One-BYOK: testing ${label}…` },
+    () => provider.testEndpoint(target)
+  );
+  const checked = list.map((e, i) => (i === index ? { ...e, lastCheckOk: result.ok } : e));
+  await writeEndpoints(checked);
+  provider.fireChanged();
+  if (result.ok) {
+    void vscode.window.showInformationMessage(`One-BYOK: ${label} — ${result.detail}`);
+    return true;
+  }
+  void vscode.window.showErrorMessage(`One-BYOK: ${label} — ${result.detail}`);
+  return false;
+}
+
+/**
+ * Interactive endpoint manager: pick an endpoint, then act on it. Repeats until
+ * the user dismisses the picker, so a multi-endpoint setup can be fixed in one
+ * pass instead of re-running a command per change.
+ *
+ * @returns {Promise<boolean>} true when something was changed.
+ */
+async function manageEndpoints(provider) {
+  let changed = false;
+  for (;;) {
+    const list = readEndpoints();
+    /** @type {import('vscode').QuickPickItem[]} */
+    const items = list.map((e, i) => {
+      const host = String(e?.baseUrl ?? '').replace(/^https?:\/\//, '');
+      const bad = e?.lastCheckOk === false;
+      return {
+        label: `${bad ? '$(error)' : '$(server)'} ${endpointName(e?.name, e?.baseUrl)}`,
+        // Showing the host disambiguates two endpoints with the same label.
+        description: e?.name ? host : undefined,
+        detail: e?.apiKey ? 'API key: set' : 'API key: not set',
+        index: i,
+      };
+    });
+    const add = { label: '$(add) Add endpoint…', addNew: true };
+    const openSettings = { label: '$(gear) Open settings…', openSettings: true };
+    const picks = await vscode.window.showQuickPick([...items, add, openSettings], {
+      title: 'One-BYOK Endpoints',
+      placeHolder: list.length
+        ? 'Pick an endpoint to edit, test or remove'
+        : 'No endpoints configured yet — add one to get started',
+    });
+    if (!picks) {
+      return changed;
+    }
+    if (picks.openSettings) {
+      await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:one-byok');
+      continue;
+    }
+    if (picks.addNew) {
+      const entry = await promptEndpoint({}, (url) => readEndpoints().some((e) => sameEndpoint(e?.baseUrl, url)));
+      if (!entry) {
+        continue;
+      }
+      const error = await writeEndpoints([...readEndpoints(), entry]);
+      if (error) {
+        void vscode.window.showErrorMessage(`One-BYOK: failed to save endpoint (${error}).`);
+        continue;
+      }
+      changed = true;
+      await provider.refreshModelsNow();
+      void vscode.window.showInformationMessage(
+        `One-BYOK: "${endpointName(entry.name, entry.baseUrl)}" added. Model list refreshed.`
+      );
+      continue;
+    }
+
+    const label = endpointName(list[picks.index]?.name, list[picks.index]?.baseUrl);
+    const actions = [
+      { label: '$(pencil) Edit', action: 'edit' },
+      { label: '$(plug) Test connection', action: 'test' },
+      { label: '$(trash) Remove', action: 'remove' },
+    ];
+    const action = await vscode.window.showQuickPick(actions, {
+      title: `One-BYOK: ${label}`,
+      placeHolder: String(list[picks.index]?.baseUrl ?? ''),
+    });
+    if (!action) {
+      continue;
+    }
+
+    if (action.action === 'test') {
+      await runEndpointTest(provider, picks.index, readEndpoints());
+      continue;
+    }
+
+    if (action.action === 'remove') {
+      const confirm = await vscode.window.showWarningMessage(
+        `Remove the endpoint "${label}"?`,
+        { modal: true },
+        'Remove'
+      );
+      if (confirm !== 'Remove') {
+        continue;
+      }
+      const error = await writeEndpoints(readEndpoints().filter((_, i) => i !== picks.index));
+      if (error) {
+        void vscode.window.showErrorMessage(`One-BYOK: failed to remove endpoint (${error}).`);
+        continue;
+      }
+      changed = true;
+      await provider.refreshModelsNow();
+      void vscode.window.showInformationMessage(`One-BYOK: "${label}" removed. Model list refreshed.`);
+      continue;
+    }
+
+    // Edit: keep the current key if the user leaves the field empty.
+    const current = readEndpoints()[picks.index];
+    const edited = await promptEndpoint(current, (url) => {
+      return readEndpoints().some((e, i) => i !== picks.index && sameEndpoint(e?.baseUrl, url));
+    });
+    if (!edited) {
+      continue;
+    }
+    const next = readEndpoints().map((e, i) => (i === picks.index ? edited : e));
+    const error = await writeEndpoints(next);
+    if (error) {
+      void vscode.window.showErrorMessage(`One-BYOK: failed to save endpoint (${error}).`);
+      continue;
+    }
+    changed = true;
+    await provider.refreshModelsNow();
+    void vscode.window.showInformationMessage(
+      `One-BYOK: "${endpointName(edited.name, edited.baseUrl)}" updated. Model list refreshed.`
+    );
+  }
+}
+
 function settings() {
   return vscode.workspace.getConfiguration('oneByok');
 }
@@ -538,6 +760,20 @@ class OneByokProvider {
   fireChanged() {
     this._cache = null;
     this._emitter.fire();
+  }
+
+  /**
+   * Force a fresh `/models` discovery, bypassing the 30 s cache. Used after a
+   * configuration change so the model picker reflects it immediately.
+   */
+  async refreshModelsNow() {
+    this._cache = null;
+    try {
+      const models = await this.provideLanguageModelChatInformation({ silent: true }, undefined);
+      logInfo(`Manual refresh found ${models.length} model(s).`);
+    } catch (err) {
+      logError('Manual refresh failed', err);
+    }
   }
 
   dispose() {
@@ -1132,6 +1368,66 @@ class OneByokProvider {
   }
 
   /**
+   * Probe an endpoint's `/models` route so a misconfigured URL or rejected key
+   * is discovered from the UI instead of at chat time.
+   *
+   * Never throws — the result is meant to be shown to the user as-is.
+   *
+   * @param {{ baseUrl: string, apiKey: string }} endpoint
+   * @returns {Promise<{ ok: boolean, detail: string, count?: number, status?: number }>}
+   */
+  async testEndpoint(endpoint) {
+    const url = trimUrl(endpoint?.baseUrl);
+    if (!url) {
+      return { ok: false, detail: 'No base URL configured.' };
+    }
+    const started = Date.now();
+    try {
+      const res = await fetch(`${url}/models`, {
+        headers: this.headers(String(endpoint?.apiKey ?? '').trim(), false),
+        signal: this.signal(undefined, 15000),
+      });
+      const elapsed = Date.now() - started;
+      if (!res.ok) {
+        const raw = (await res.text().catch(() => '')).slice(0, 500);
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = raw;
+        }
+        const detail = errorMessageFromBody(parsed) || raw.slice(0, 200);
+        logWarn(`Endpoint test failed: ${url} returned HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+        return {
+          ok: false,
+          status: res.status,
+          detail:
+            `HTTP ${res.status} from ${url}/models` +
+            (detail ? ` — ${detail}` : '') +
+            (res.status === 401 || res.status === 403 ? ' Check the API key.' : ''),
+        };
+      }
+      const payload = await res.json().catch(() => undefined);
+      const count = Array.isArray(payload?.data) ? payload.data.length : 0;
+      logInfo(`Endpoint test ok: ${url}/models returned ${count} model(s) in ${elapsed}ms.`);
+      return { ok: true, count, detail: `OK — ${count} model(s) in ${elapsed}ms.` };
+    } catch (err) {
+      const cause = describeErrorCause(err);
+      const message = String(err?.message ?? err);
+      logWarn(`Endpoint test failed: ${url} unreachable — ${message}${cause ? ` (cause: ${cause})` : ''}`);
+      // Reuse the network hints so an unreachable tunnel reads the same here as
+      // it does in chat.
+      const hint = networkHint(cause);
+      return {
+        ok: false,
+        detail:
+          `Could not reach ${url}/models — ${cause || message}` +
+          (hint ? ` ${hint}` : ''),
+      };
+    }
+  }
+
+  /**
    * Read an error response body and turn it into an HttpError carrying the
    * server's own message.
    *
@@ -1509,70 +1805,34 @@ function activate(context) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('oneByok.openSettings', async () => {
+      // The configuration UI is generated from package.json, so opening the
+      // filtered settings page already covers all 14 oneByok.* settings.
+      await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:one-byok');
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('oneByok.manageEndpoints', async () => {
+      const changed = await manageEndpoints(provider);
+      if (changed) {
+        logInfo('Endpoint configuration changed from the endpoint manager.');
+      }
+    })
+  );
+
+  // Kept for backwards compatibility with existing keybindings and muscle
+  // memory: the dedicated add/remove commands now open the manager, so there is
+  // exactly one code path that writes oneByok.endpoints.
+  context.subscriptions.push(
     vscode.commands.registerCommand('oneByok.addEndpoint', async () => {
-      const name = await vscode.window.showInputBox({
-        prompt: 'Name for this endpoint (e.g. "My Ollama")',
-        ignoreFocusOut: true,
-      });
-      if (name === undefined) {
-        return;
-      }
-      const label = name.trim();
-      const baseUrl = await vscode.window.showInputBox({
-        prompt: 'Base URL of the OpenAI-compatible endpoint (e.g. http://localhost:11434/v1)',
-        ignoreFocusOut: true,
-      });
-      if (baseUrl === undefined) {
-        return;
-      }
-      const url = trimUrl(baseUrl);
-      if (!url) {
-        void vscode.window.showWarningMessage('One-BYOK: empty base URL — nothing added.');
-        return;
-      }
-      const apiKey = await vscode.window.showInputBox({
-        prompt: `API key for ${url} (leave empty for local endpoints)`,
-        password: true,
-        ignoreFocusOut: true,
-      });
-      if (apiKey === undefined) {
-        return;
-      }
-      const endpoints = Array.isArray(settings().get('endpoints', [])) ? settings().get('endpoints', []) : [];
-      if (endpoints.some((e) => trimUrl(e?.baseUrl) === url)) {
-        void vscode.window.showWarningMessage('One-BYOK: that endpoint is already configured.');
-        return;
-      }
-      const entry = { baseUrl: url, apiKey: apiKey.trim() };
-      if (label) {
-        // ponytail: optional label; unnamed endpoints fall back to the host
-        entry.name = label;
-      }
-      try {
-        await settings().update('endpoints', [...endpoints, entry], vscode.ConfigurationTarget.Global);
-      } catch (err) {
-        // ponytail: surface a silent write failure instead of losing the endpoint
-        void vscode.window.showErrorMessage(`One-BYOK: failed to save endpoint (${String(err?.message ?? err)}).`);
-        return;
-      }
-      provider.fireChanged();
-      void vscode.window.showInformationMessage('One-BYOK: endpoint added. Model list will refresh automatically.');
+      await manageEndpoints(provider);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('oneByok.removeEndpoint', async () => {
-      const endpoints = Array.isArray(settings().get('endpoints', [])) ? settings().get('endpoints', []) : [];
-      const picks = await vscode.window.showQuickPick(
-        endpoints.map((e, i) => ({ label: endpointName(e?.name, e?.baseUrl), description: e?.apiKey ? 'key set' : 'no key', index: i })),
-        { placeHolder: 'Select an endpoint to remove' }
-      );
-      if (!picks) {
-        return;
-      }
-      await settings().update('endpoints', endpoints.filter((_, i) => i !== picks.index), vscode.ConfigurationTarget.Global);
-      provider.fireChanged();
-      void vscode.window.showInformationMessage('One-BYOK: endpoint removed. Model list will refresh automatically.');
+      await manageEndpoints(provider);
     })
   );
 

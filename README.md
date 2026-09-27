@@ -73,16 +73,24 @@ Then in VS Code: Extensions view → `⋯` → **Install from VSIX…** → pick
 
 ### Option 2: Command Palette (any number of endpoints)
 
-For a second, third, etc. endpoint (VS Code's native UI only stores one per vendor):
+Run **One-BYOK: Manage Endpoints** from the Command Palette (`Ctrl+Shift+P`). The manager lets you:
 
-1. Command Palette → **One-BYOK: Add Endpoint**
-2. Enter a display name (e.g. "My Ollama")
-3. Enter the base URL (e.g. `http://localhost:11434/v1`)
-4. Enter the API key if required (leave blank for keyless servers)
-5. Repeat for each endpoint.
+- **Add** an endpoint — name, base URL and API key. The URL is validated (must start with
+  `http://` or `https://`, duplicates are rejected).
+- **Edit** an endpoint — the stored API key is kept when you leave the key field empty, and it
+  is never pre-filled or displayed.
+- **Test connection** — calls `<baseUrl>/models` and reports how many models came back, or the
+  server's own error message. Checked endpoints are marked in the list with a check or a warning
+  icon, so "which of my endpoints work?" is answerable at a glance.
+- **Remove** an endpoint — behind a confirmation dialog.
+
+The model list refreshes automatically after every change, so no manual refresh is needed.
+
+> **One-BYOK: Open Settings** opens the Settings page filtered to every `oneByok.*` option — all
+> 14 of them are editable there with normal checkboxes and fields.
 
 All endpoints appear in the model picker with their name as a suffix (e.g. `llama3 · My Ollama`).
-Use **One-BYOK: Remove Endpoint** to delete one.
+Open **One-BYOK: Manage Endpoints** again at any time to edit, test or remove one.
 
 ## Use
 
@@ -280,7 +288,7 @@ For now, tools are limited to what VS Code provides natively. Stay tuned for MCP
 
 ### Models don't appear / "Not configured"
 
-1. Ensure you've added at least one endpoint via **Add model** (native UI) or **One-BYOK: Add Endpoint** (Command Palette).
+1. Ensure you've added at least one endpoint via **Add model** (native UI) or **One-BYOK: Manage Endpoints** (Command Palette).
 2. Check the **One-BYOK** output channel — it logs the base URL/key source used for discovery (`setting:oneByok.endpoints`, `secret:...`, or `setting:...`).
 3. Run **One-BYOK: Refresh Model List** after changing the configuration.
 4. If you see duplicate empty entries (e.g. `one-byok 2`), delete them via the gear icon next to the provider in **Manage Models**.
